@@ -1,0 +1,2 @@
+data/* filter=lfs diff=lfs merge=lfs -text
+data/x86_64/* filter=lfs diff=lfs merge=lfs -text
