@@ -1,0 +1,41 @@
+[package]
+name = "rhyve"
+version = "0.1.0"
+authors = ["Stefan Lankes <slankes@eonerc.rwth-aachen.de>"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["hypervisor", "virtualization"]
+categories = ["no_std", "virtualization"]
+repository = "https://github.com/hermit-os/rhyve"
+description = "A resource-aware Hyervisor"
+
+[dependencies]
+hermit-kernel = { git = "https://github.com/hermit-os/kernel.git", version = "0.10.0" }
+log = { version = "0.4", default-features = false }
+x86_64 = "0.15"
+raw-cpuid = "11.5.0"
+bitfield = "0.19.0"
+bit_field = "0.10.2"
+thiserror-no-std = "2.0.2"
+bitflags = "2"
+num = { version = "0.4", default-features = false }
+num-traits = { version = "0.2.19", default-features = false }
+num-derive = { version = "0.4.2", default-features = false }
+hermit-entry = { version = "0.10.3", features = ["loader"] }
+hermit-sync = "0.1"
+time = { version = "0.3", default-features = false }
+
+[features]
+default = ["pci", "pci-ids", "fsgsbase", "acpi", "fuse", "dns", "dhcpv4", "tcp", "udp"]
+vga = ["hermit-kernel/vga"]
+pci = ["hermit-kernel/pci"]
+pci-ids = ["hermit-kernel/pci-ids"]
+acpi = ["hermit-kernel/acpi"]
+fsgsbase = ["hermit-kernel/fsgsbase"]
+smp = ["hermit-kernel/smp"]
+fuse = ["hermit-kernel/fuse"]
+tcp = ["hermit-kernel/tcp"]
+udp = ["hermit-kernel/udp"]
+dns = ["hermit-kernel/dns"]
+dhcpv4 = ["hermit-kernel/dhcpv4"]
