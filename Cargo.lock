@@ -79,7 +79,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283195c61a2bbd6c5e79a0d707951799f97503db21974de7c9f948c05ba3ad8"
 dependencies = [
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
  "thiserror",
 ]
 
@@ -156,9 +156,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
-version = "2.9.0"
+version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c8214115b7bf84099f1309324e63141d4c5d7cc26862f97a0a857dbefe165bd"
+checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
 
 [[package]]
 name = "build-time"
@@ -310,7 +310,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b4a54dfedecb1dc004776a597db0c858cf6c31579296734511309291b8399ce"
 dependencies = [
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
  "zerocopy 0.8.24",
  "zerocopy-derive 0.8.24",
 ]
@@ -447,7 +447,7 @@ dependencies = [
  "async-lock",
  "async-trait",
  "bit_field",
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
  "build-time",
  "cfg-if",
  "crossbeam-utils",
@@ -630,7 +630,7 @@ version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
 dependencies = [
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
  "cfg-if",
  "cfg_aliases",
  "libc",
@@ -785,7 +785,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4325c6aa3cca3373503b1527e75756f9fbfe5fd76be4b4c8a143ee47430b8e0"
 dependencies = [
  "bit_field",
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
 ]
 
 [[package]]
@@ -939,7 +939,7 @@ version = "11.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6df7ab838ed27997ba19a4664507e6f82b41fe6e20be42929332156e5e85146"
 dependencies = [
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
 ]
 
 [[package]]
@@ -948,7 +948,7 @@ version = "0.1.0"
 dependencies = [
  "bit_field",
  "bitfield",
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
  "hermit-entry",
  "hermit-kernel",
  "hermit-sync",
@@ -1198,7 +1198,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e492212ac378a5e00da953718dafb1340d9fbaf4f27d6f3c5cab03d931d1c049"
 dependencies = [
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
  "rustversion",
  "x86",
 ]
@@ -1235,7 +1235,7 @@ checksum = "49c4d9057347dd68d5c3f9ac5ec5d76adfe59d7378c4ae44f022795aa42953e6"
 dependencies = [
  "allocator-api2",
  "bitfield-struct",
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
  "endian-num",
  "num_enum",
  "pci_types",
@@ -1423,7 +1423,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f042214de98141e9c8706e8192b73f56494087cc55ebec28ce10f26c5c364ae"
 dependencies = [
  "bit_field",
- "bitflags 2.9.0",
+ "bitflags 2.9.1",
  "rustversion",
  "volatile 0.4.6",
 ]
