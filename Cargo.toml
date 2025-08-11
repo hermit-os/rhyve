@@ -22,7 +22,7 @@ bitflags = "2"
 num = { version = "0.4", default-features = false }
 num-traits = { version = "0.2.19", default-features = false }
 num-derive = { version = "0.4.2", default-features = false }
-hermit-entry = { version = "0.10.3", features = ["loader"] }
+hermit-entry = { version = "0.10.4", features = ["loader"] }
 hermit-sync = "0.1"
 time = { version = "0.3", default-features = false }
 
