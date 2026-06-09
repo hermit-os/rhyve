@@ -5,6 +5,7 @@ use core::fmt;
 
 use bitfield::BitMut;
 use hermit::arch::{BasePageSize, PageSize};
+use hermit_sync::OnceCell;
 use x86_64::PrivilegeLevel;
 use x86_64::registers::control::{Cr0Flags, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
@@ -12,7 +13,10 @@ use x86_64::registers::rflags::{self, RFlags};
 use x86_64::structures::gdt::SegmentSelector;
 
 use crate::error::HypervisorError;
-use crate::intel::IA32_VMX_BASIC;
+use crate::vmx::IA32_VMX_BASIC;
+
+static CAP_PINBASED: OnceCell<u64> = OnceCell::new();
+static CAP_PROCBASED: OnceCell<u64> = OnceCell::new();
 
 /// Read a specified field from a VMCS.
 #[inline(always)]
@@ -683,6 +687,11 @@ pub mod ro {
 	pub const GUEST_LINEAR_ADDR: u32 = 0x640A;
 }
 
+/* desired control word constrained by hardware/hypervisor capabilities */
+fn cap2ctrl(cap: u64, ctrl: u64) -> u64 {
+	(ctrl | (cap & 0xffffffff)) & (cap >> 32)
+}
+
 /// Represents the VMCS region in memory.
 ///
 /// The VMCS region is essential for VMX operations on the CPU.
@@ -753,6 +762,30 @@ impl Vmcs {
 	}
 
 	pub fn setup_capabilities(&mut self) -> Result<(), HypervisorError> {
+		let cap = vmread(control::PINBASED_EXEC_CONTROLS)?;
+		CAP_PINBASED
+			.set(cap2ctrl(
+				cap,
+				(control::PinbasedControls::EXTERNAL_INTERRUPT_EXITING
+					| control::PinbasedControls::NMI_EXITING
+					| control::PinbasedControls::VIRTUAL_NMIS)
+					.bits() as u64,
+			))
+			.unwrap();
+		info!("CAP_PINBASED 0x{:x}", CAP_PINBASED.get().unwrap());
+
+		let cap: u64 = vmread(control::PRIMARY_PROCBASED_EXEC_CONTROLS)?;
+		info!("cap 0x{:x}", cap);
+
+		let cap: u64 = vmread(control::SECONDARY_PROCBASED_EXEC_CONTROLS)?;
+		info!("cap 0x{:x}", cap);
+
+		let cap: u64 = vmread(control::SECONDARY_PROCBASED_EXEC_CONTROLS)?;
+		info!("cap 0x{:x}", cap);
+
+		let cap: u64 = vmread(control::SECONDARY_PROCBASED_EXEC_CONTROLS)?;
+		info!("cap 0x{:x}", cap);
+
 		Ok(())
 	}
 

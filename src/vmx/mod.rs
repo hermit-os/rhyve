@@ -6,15 +6,16 @@ use core::arch::asm;
 use core::mem::MaybeUninit;
 
 use hermit::mm::{VirtAddr, virtual_to_physical};
-use raw_cpuid::CpuId;
+use raw_cpuid::{CpuId, Hypervisor};
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
 
 use crate::error::HypervisorError;
-use crate::intel::vmcs::Vmcs;
-use crate::intel::vmerror::VmxBasicExitReason;
-use crate::intel::vmxon::Vmxon;
+use crate::vm::*;
+use crate::vmx::vmcs::Vmcs;
+use crate::vmx::vmerror::VmxBasicExitReason;
+use crate::vmx::vmxon::Vmxon;
 
 /// Reporting Register of Basic VMX Capabilities (R/O) See Table 35-2. See Appendix A.1, Basic VMX Information (If CPUID.01H:ECX.\[bit 9\])
 const IA32_VMX_BASIC: u32 = 0x480;
@@ -35,6 +36,9 @@ fn cap2ctrl(cap: u64, ctrl: u64) -> u64 {
 
 /// Represents a Virtual Machine (VM) instance, encapsulating its state and control mechanisms.
 pub struct Vm {
+	/// Id of the virtual machine instance
+	pub id: VmId,
+
 	/// The VMXON (Virtual Machine Extensions On) region for the VM.
 	/// - Aligned to 4096 bytes (0x1000)
 	pub vmxon_region: Vmxon,
@@ -45,13 +49,8 @@ pub struct Vm {
 }
 
 impl Vm {
-	/// Creates a new zeroed VM instance.
-	pub fn zeroed() -> MaybeUninit<Self> {
-		MaybeUninit::zeroed()
-	}
-
 	/// Initializes a new VM instance with specified guest registers.
-	pub fn init(&mut self) -> Result<(), HypervisorError> {
+	fn init(&mut self) -> Result<(), HypervisorError> {
 		self.vmxon_region.init();
 		self.vmcs_region.init();
 
@@ -77,7 +76,7 @@ impl Vm {
 	/// # Returns
 	///
 	/// Returns `Ok(())` if all configurations are successfully applied, or an `Err(HypervisorError)` if adjustments fail.
-	pub fn setup_vmxon(&self) -> Result<(), HypervisorError> {
+	fn setup_vmxon(&self) -> Result<(), HypervisorError> {
 		const IA32_FEATURE_CONTROL: u32 = 0x3a;
 		const VMX_LOCK_BIT: u64 = 1 << 0;
 		const VMXON_OUTSIDE_SMX: u64 = 1 << 2;
@@ -135,7 +134,7 @@ impl Vm {
 	/// # Returns
 	///
 	/// Returns `Ok(())` on successful activation, or an `Err(HypervisorError)` if activation fails.
-	pub fn setup_vmcs(&mut self) -> Result<(), HypervisorError> {
+	fn setup_vmcs(&mut self) -> Result<(), HypervisorError> {
 		// Clear the VMCS region.
 		let vmcs_addr = virtual_to_physical(VirtAddr::from_ptr(&self.vmcs_region as *const _))
 			.unwrap()
@@ -167,6 +166,28 @@ impl Vm {
 	/// if the VM fails to launch or an unknown exit reason is encountered.
 	pub fn run(&mut self) -> Result<VmxBasicExitReason, HypervisorError> {
 		Err(HypervisorError::UnknownVMExitReason)
+	}
+}
+
+impl VirtualMachine for Vm {
+	fn new(id: VmId) -> Result<Self, HypervisorError> {
+		let mut vm: Vm = Self {
+			id,
+			vmcs_region: unsafe { MaybeUninit::zeroed().assume_init() },
+			vmxon_region: unsafe { MaybeUninit::zeroed().assume_init() },
+		};
+
+		match vm.init() {
+			Ok(_) => debug!("VM initialized"),
+			Err(e) => panic!("Failed to initialize VM: {:?}", e),
+		}
+
+		// initialize VMX
+		vm.setup_vmxon().unwrap();
+		// initialize VMCS
+		vm.setup_vmcs().unwrap();
+
+		Ok(vm)
 	}
 }
 

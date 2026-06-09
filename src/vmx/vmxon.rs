@@ -2,7 +2,7 @@ use bitfield::BitMut;
 use hermit::arch::{BasePageSize, PageSize};
 use x86_64::registers::model_specific::Msr;
 
-use crate::intel::IA32_VMX_BASIC;
+use crate::vmx::IA32_VMX_BASIC;
 
 /// A representation of the VMXON region in memory.
 ///

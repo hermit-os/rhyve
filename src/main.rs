@@ -7,17 +7,21 @@ extern crate alloc;
 extern crate hermit;
 
 mod error;
-mod intel;
+mod vcpu;
+mod vm;
+mod vmx;
 
+use alloc::borrow::ToOwned;
 use alloc::vec;
+use core::ffi::CStr;
 use core::mem::MaybeUninit;
 use core::num::NonZero;
 use core::ptr::slice_from_raw_parts_mut;
 
+use embedded_io::Read;
 use hermit::arch::{BasePageSize, PageSize};
 use hermit::fd::AccessPermission;
 use hermit::fs::{self, File, create_dir, create_file};
-use hermit::io::Read;
 use hermit::scheduler::task::NORMAL_PRIO;
 use hermit::scheduler::{join, shutdown, spawn};
 use hermit::syscalls::{sys_alloc, sys_get_processor_frequency};
@@ -26,6 +30,9 @@ use hermit_entry::boot_info::*;
 use hermit_entry::elf::{KernelObject, LoadedKernel};
 use time::OffsetDateTime;
 use x86_64::instructions::interrupts;
+
+use crate::error::HypervisorError;
+use crate::vm::VirtualMachine;
 
 static GUEST: &[u8] = include_bytes!("../data/x86_64/hello_world");
 
@@ -64,26 +71,19 @@ fn mount_guest_image() {
 	}
 }
 
-#[derive(Debug, PartialEq)]
-pub enum LoaderError {
-	IoError(i32),
-	ParseError,
-	InvalidElfFile,
-}
-
-fn load_guest_image(guest_slice: &mut [MaybeUninit<u8>]) -> Result<LoadedKernel, LoaderError> {
-	let app = "/image/guest";
-	let meta = fs::metadata(app)
-		.map_err(|e| LoaderError::IoError(num::ToPrimitive::to_i32(&e).unwrap()))?;
+fn load_guest_image(
+	image: &str,
+	guest_slice: &mut [MaybeUninit<u8>],
+) -> Result<LoadedKernel, HypervisorError> {
+	let meta = fs::metadata(image).map_err(|e| HypervisorError::IoError(e))?;
 	let len = meta.len();
-	let mut file =
-		File::open(app).map_err(|e| LoaderError::IoError(num::ToPrimitive::to_i32(&e).unwrap()))?;
+	let mut file = File::open(image).map_err(|e| HypervisorError::IoError(e))?;
 
 	let mut buffer = vec![0; len];
 	file.read(&mut buffer)
-		.map_err(|e| LoaderError::IoError(num::ToPrimitive::to_i32(&e).unwrap()))?;
+		.map_err(|e| HypervisorError::IoError(e))?;
 
-	let elf_kernel = KernelObject::parse(&buffer).map_err(|_| LoaderError::ParseError)?;
+	let elf_kernel = KernelObject::parse(&buffer).map_err(|_| HypervisorError::ParseError)?;
 	let kernel_offset = 128 * BasePageSize::SIZE;
 	let loaded_kernel = elf_kernel.load_kernel(
 		&mut guest_slice[kernel_offset as usize..kernel_offset as usize + elf_kernel.mem_size()],
@@ -93,9 +93,11 @@ fn load_guest_image(guest_slice: &mut [MaybeUninit<u8>]) -> Result<LoadedKernel,
 	Ok(loaded_kernel)
 }
 
-extern "C" fn start_hypervisor(_: usize) {
-	// check if we are running on a Intel CPU with VMX support
-	intel::check_supported_cpu().unwrap();
+fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
+	info!("HHHH");
+	let image = image.to_str().expect("Invalid UTF-8 in application path");
+
+	info!("Using image {image:?}");
 
 	// Create slice for the guest
 	let guest_size = 32768 * BasePageSize::SIZE as usize;
@@ -103,10 +105,8 @@ extern "C" fn start_hypervisor(_: usize) {
 	let guest_slice: &mut [MaybeUninit<u8>] =
 		unsafe { &mut *slice_from_raw_parts_mut(guest_ptr, guest_size) };
 
-	mount_guest_image();
-
 	// load guest
-	let loaded_kernel = load_guest_image(guest_slice).unwrap();
+	let loaded_kernel = load_guest_image(image, guest_slice)?;
 	debug!("Kernel entry point 0x{:x}", loaded_kernel.entry_point);
 	debug!("LoadInfo {:x?}", loaded_kernel.load_info);
 
@@ -139,16 +139,7 @@ extern "C" fn start_hypervisor(_: usize) {
 
 	interrupts::disable();
 
-	let mut vm = unsafe { intel::Vm::zeroed().assume_init() };
-	match vm.init() {
-		Ok(_) => debug!("VM initialized"),
-		Err(e) => panic!("Failed to initialize VM: {:?}", e),
-	}
-
-	// initialize VMX
-	vm.setup_vmxon().unwrap();
-	// initialize VMCS
-	vm.setup_vmcs().unwrap();
+	let mut vm = vmx::Vm::new(0)?;
 
 	debug!("VMCS Dump: {:#x?}", vm.vmcs_region);
 
@@ -159,19 +150,33 @@ extern "C" fn start_hypervisor(_: usize) {
 			info!("eixt_reason {:?}", basic_exit_reason);
 		} else {
 			error!("Failed to run the VM");
-			break;
+			break Ok(());
 		}
 	}
+}
+
+extern "C" fn start_hypervisor(path: usize) {
+	let image = unsafe { CStr::from_ptr(core::ptr::with_exposed_provenance(path)) };
+	let _ = init_hypervisor(image)
+		.map_err(|e| error!("Unable to start hypervisor with image {image:?}: {e:?}"));
 }
 
 #[unsafe(no_mangle)] // don't mangle the name of this function
 pub extern "C" fn runtime_entry(_argc: i32, _argv: *const *const u8, _env: *const *const u8) -> ! {
 	info!("Initialize rhyve");
 
+	vmx::check_supported_cpu().expect("VMX isn't supported");
+
+	// mount guest image
+	mount_guest_image();
+
+	debug!("Spawn thread to start the hypervisor");
+
+	let image = c"/image/guest".to_owned();
 	let id = unsafe {
 		spawn(
 			start_hypervisor,
-			0,
+			image.into_raw() as usize,
 			NORMAL_PRIO,
 			hermit::DEFAULT_STACK_SIZE,
 			-1,

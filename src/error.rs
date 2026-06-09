@@ -2,6 +2,12 @@ use thiserror_no_std::Error;
 
 #[derive(Error, Debug)]
 pub enum HypervisorError {
+	#[error("IO error")]
+	IoError(hermit::errno::Errno),
+	#[error("Unable to parse ELF file")]
+	ParseError,
+	#[error("Invalid ELF file")]
+	InvalidElfFile,
 	#[error("Intel CPU not found")]
 	CPUUnsupported,
 	#[error("VMX is not supported")]
