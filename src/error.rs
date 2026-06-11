@@ -18,6 +18,10 @@ pub enum HypervisorError {
 	VMREADFailed,
 	#[error("Failed to execute VMWRITE")]
 	VMWRITEFailed,
+	#[error("Failed to execute VMLAUNCH/VMRESUME (VM-instruction error {0})")]
+	VMEntryFailed(u64),
+	#[error("Failed to allocate memory")]
+	AllocationFailed,
 	#[error("Unknown VM exit basic reason")]
 	UnknownVMExitReason,
 }

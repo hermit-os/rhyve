@@ -32,7 +32,8 @@ use time::OffsetDateTime;
 use x86_64::instructions::interrupts;
 
 use crate::error::HypervisorError;
-use crate::vm::VirtualMachine;
+use crate::vcpu::VCpu;
+use crate::vm::{Vm, VirtualMachine, VmConfig};
 
 static GUEST: &[u8] = include_bytes!("../data/x86_64/hello_world");
 
@@ -49,6 +50,46 @@ pub const EFER_SCE: u64 = 1; /* System Call Extensions */
 pub const EFER_LME: u64 = 1 << 8; /* Long mode enable */
 pub const EFER_LMA: u64 = 1 << 10; /* Long mode active (read-only) */
 pub const EFER_NXE: u64 = 1 << 11; /* PTE No-Execute bit enable */
+
+/// Guest-physical address of the boot page-directory-pointer table.
+pub const BOOT_PDPTE: u64 = BOOT_PML4 + 0x1000;
+/// Guest-physical address of the boot page directory.
+pub const BOOT_PDE: u64 = BOOT_PML4 + 0x2000;
+/// Initial guest stack pointer (grows down, below the loaded kernel).
+pub const BOOT_STACK_TOP: u64 = 0x70000;
+
+/// Page-table/GDT entry flags.
+const PG_PRESENT: u64 = 1 << 0;
+const PG_RW: u64 = 1 << 1;
+const PG_HUGE: u64 = 1 << 7;
+
+/// Initializes the guest's boot memory: a flat GDT and 4-level page tables that
+/// identity-map the first 1 GiB of guest-physical memory with 2 MiB pages.
+///
+/// The guest enters in long mode with `CR3 = BOOT_PML4`, so these structures
+/// must already be present before the first instruction executes.
+fn init_guest_memory(guest_slice: &mut [MaybeUninit<u8>]) {
+	let base = guest_slice.as_mut_ptr() as *mut u8;
+	let write_entry = |off: u64, val: u64| unsafe { (base.add(off as usize) as *mut u64).write(val) };
+
+	// Boot GDT: null, 64-bit ring-0 code, ring-0 data.
+	write_entry(GDT_OFFSET, 0);
+	write_entry(GDT_OFFSET + 8, 0x00AF_9B00_0000_FFFF);
+	write_entry(GDT_OFFSET + 16, 0x00CF_9300_0000_FFFF);
+
+	// PML4 and PDPT: a single entry each, pointing at the next level.
+	for i in 0..512 {
+		write_entry(BOOT_PML4 + i * 8, 0);
+		write_entry(BOOT_PDPTE + i * 8, 0);
+	}
+	write_entry(BOOT_PML4, BOOT_PDPTE | PG_PRESENT | PG_RW);
+	write_entry(BOOT_PDPTE, BOOT_PDE | PG_PRESENT | PG_RW);
+
+	// Page directory: 512 × 2 MiB pages identity-mapping the first 1 GiB.
+	for i in 0..512 {
+		write_entry(BOOT_PDE + i * 8, (i << 21) | PG_PRESENT | PG_RW | PG_HUGE);
+	}
+}
 
 fn mount_guest_image() {
 	create_dir("/image", AccessPermission::from_bits(0o777).unwrap())
@@ -94,7 +135,6 @@ fn load_guest_image(
 }
 
 fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
-	info!("HHHH");
 	let image = image.to_str().expect("Invalid UTF-8 in application path");
 
 	info!("Using image {image:?}");
@@ -137,22 +177,34 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 		*raw_boot_info_ptr = RawBootInfo::from(boot_info);
 	}
 
+	// Set up the guest's boot GDT and page tables in guest memory.
+	init_guest_memory(guest_slice);
+
 	interrupts::disable();
 
-	let mut vm = vmx::Vm::new(0)?;
+	// Create the VM (building the shared EPT) and add the boot vCPU to it.
+	let mut vm = Vm::new(
+		0,
+		VmConfig {
+			guest_base: guest_ptr.cast::<u8>(),
+			guest_size,
+		},
+	)?;
+	let cpu = vm.create_cpu(loaded_kernel.entry_point, BOOT_STACK_TOP)?;
 
-	debug!("VMCS Dump: {:#x?}", vm.vmcs_region);
-
-	interrupts::enable();
-
-	loop {
-		if let Ok(basic_exit_reason) = vm.run() {
-			info!("eixt_reason {:?}", basic_exit_reason);
-		} else {
-			error!("Failed to run the VM");
-			break Ok(());
+	// Enter the guest and report the first VM-exit.
+	match cpu.run() {
+		Ok(reason) => {
+			let regs = cpu.registers();
+			info!(
+				"VM-exit: {reason} (guest RIP {:#x}, RSP {:#x})",
+				regs.rip, regs.rsp
+			);
 		}
+		Err(e) => error!("VM-entry failed: {e:?}"),
 	}
+
+	Ok(())
 }
 
 extern "C" fn start_hypervisor(path: usize) {

@@ -5,18 +5,104 @@ use core::fmt;
 
 use bitfield::BitMut;
 use hermit::arch::{BasePageSize, PageSize};
-use hermit_sync::OnceCell;
 use x86_64::PrivilegeLevel;
-use x86_64::registers::control::{Cr0Flags, Cr4Flags};
+use x86_64::instructions::segmentation::{CS, DS, ES, FS, GS, SS, Segment};
+use x86_64::instructions::tables::{sgdt, sidt};
+use x86_64::registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
 use x86_64::structures::gdt::SegmentSelector;
 
 use crate::error::HypervisorError;
 use crate::vmx::IA32_VMX_BASIC;
+use crate::vmx::run::GuestRegisters;
+use crate::vmx::vmcs::control::{EntryControls, ExitControls, PrimaryControls, SecondaryControls};
 
-static CAP_PINBASED: OnceCell<u64> = OnceCell::new();
-static CAP_PROCBASED: OnceCell<u64> = OnceCell::new();
+/// IA32_FS_BASE model-specific register.
+const IA32_FS_BASE: u32 = 0xC000_0100;
+/// IA32_GS_BASE model-specific register.
+const IA32_GS_BASE: u32 = 0xC000_0101;
+/// IA32_SYSENTER_CS model-specific register.
+const IA32_SYSENTER_CS: u32 = 0x174;
+/// IA32_SYSENTER_ESP model-specific register.
+const IA32_SYSENTER_ESP: u32 = 0x175;
+/// IA32_SYSENTER_EIP model-specific register.
+const IA32_SYSENTER_EIP: u32 = 0x176;
+/// IA32_EFER model-specific register.
+const IA32_EFER: u32 = 0xC000_0080;
+
+// VMX capability MSRs reporting allowed settings of the control fields.
+const IA32_VMX_PINBASED_CTLS: u32 = 0x481;
+const IA32_VMX_PROCBASED_CTLS: u32 = 0x482;
+const IA32_VMX_EXIT_CTLS: u32 = 0x483;
+const IA32_VMX_ENTRY_CTLS: u32 = 0x484;
+const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48B;
+const IA32_VMX_TRUE_PINBASED_CTLS: u32 = 0x48D;
+const IA32_VMX_TRUE_PROCBASED_CTLS: u32 = 0x48E;
+const IA32_VMX_TRUE_EXIT_CTLS: u32 = 0x48F;
+const IA32_VMX_TRUE_ENTRY_CTLS: u32 = 0x490;
+/// `IA32_VMX_BASIC[55]`: the `IA32_VMX_TRUE_*` capability MSRs are supported.
+const IA32_VMX_BASIC_TRUE_CTLS: u64 = 1 << 55;
+
+/// Identifies which VMX control field a capability adjustment applies to.
+#[derive(Clone, Copy)]
+enum VmxControl {
+	PinBased,
+	ProcessorBased,
+	ProcessorBased2,
+	VmExit,
+	VmEntry,
+}
+
+/// Constrains a requested control value to what the hardware allows.
+///
+/// Each VMX capability MSR packs the bits that *may be 0* in its low half and
+/// the bits that *may be 1* in its high half. Bits that must be 1 are forced on,
+/// bits that must be 0 are forced off. See Intel SDM, Appendix A.3.
+fn adjust_control(control: VmxControl, requested: u64) -> u64 {
+	let true_ctls = unsafe { Msr::new(IA32_VMX_BASIC).read() } & IA32_VMX_BASIC_TRUE_CTLS != 0;
+
+	let cap_msr = match (control, true_ctls) {
+		(VmxControl::PinBased, true) => IA32_VMX_TRUE_PINBASED_CTLS,
+		(VmxControl::PinBased, false) => IA32_VMX_PINBASED_CTLS,
+		(VmxControl::ProcessorBased, true) => IA32_VMX_TRUE_PROCBASED_CTLS,
+		(VmxControl::ProcessorBased, false) => IA32_VMX_PROCBASED_CTLS,
+		(VmxControl::VmExit, true) => IA32_VMX_TRUE_EXIT_CTLS,
+		(VmxControl::VmExit, false) => IA32_VMX_EXIT_CTLS,
+		(VmxControl::VmEntry, true) => IA32_VMX_TRUE_ENTRY_CTLS,
+		(VmxControl::VmEntry, false) => IA32_VMX_ENTRY_CTLS,
+		// There is no "TRUE" variant for the secondary controls.
+		(VmxControl::ProcessorBased2, _) => IA32_VMX_PROCBASED_CTLS2,
+	};
+
+	let capabilities = unsafe { Msr::new(cap_msr).read() };
+	let allowed0 = capabilities as u32; // bits that may be 0
+	let allowed1 = (capabilities >> 32) as u32; // bits that may be 1
+	let mut effective = requested as u32;
+	effective |= allowed0; // force the must-be-1 bits on
+	effective &= allowed1; // force the must-be-0 bits off
+	u64::from(effective)
+}
+
+/// Reads the host task register (TR) selector.
+fn read_tr_selector() -> u16 {
+	let tr: u16;
+	unsafe { asm!("str {0:x}", out(reg) tr, options(nomem, nostack, preserves_flags)) };
+	tr
+}
+
+/// Resolves the base address of a TSS descriptor in the host GDT.
+fn tss_base(gdt_base: u64, tr_selector: u16) -> u64 {
+	let index = (tr_selector >> 3) as u64;
+	let descriptor = (gdt_base + index * 8) as *const u64;
+	// A 64-bit TSS descriptor spans two consecutive 8-byte slots.
+	let low = unsafe { descriptor.read() };
+	let high = unsafe { descriptor.add(1).read() };
+	((low >> 16) & 0xFFFF)
+		| (((low >> 32) & 0xFF) << 16)
+		| (((low >> 56) & 0xFF) << 24)
+		| ((high & 0xFFFF_FFFF) << 32)
+}
 
 /// Read a specified field from a VMCS.
 #[inline(always)]
@@ -687,11 +773,6 @@ pub mod ro {
 	pub const GUEST_LINEAR_ADDR: u32 = 0x640A;
 }
 
-/* desired control word constrained by hardware/hypervisor capabilities */
-fn cap2ctrl(cap: u64, ctrl: u64) -> u64 {
-	(ctrl | (cap & 0xffffffff)) & (cap >> 32)
-}
-
 /// Represents the VMCS region in memory.
 ///
 /// The VMCS region is essential for VMX operations on the CPU.
@@ -714,82 +795,128 @@ impl Vmcs {
 		self.revision_id.set_bit(31, false);
 	}
 
-	pub fn setup_system_gdt(&mut self) -> Result<(), HypervisorError> {
+	/// Configures the VM-execution, VM-entry and VM-exit control fields.
+	///
+	/// Enables EPT (using `eptp`) and configures the guest to run as a 64-bit
+	/// (IA-32e mode) guest while the host returns to 64-bit mode on VM-exit.
+	/// Every value is constrained by the VMX capability MSRs via
+	/// [`adjust_control`].
+	pub fn setup_controls(&mut self, eptp: u64) -> Result<(), HypervisorError> {
+		// No pin-based controls are required for a minimal guest.
+		let pinbased = adjust_control(VmxControl::PinBased, 0);
+		// Activate the secondary controls so EPT can be enabled.
+		let procbased = adjust_control(
+			VmxControl::ProcessorBased,
+			PrimaryControls::SECONDARY_CONTROLS.bits() as u64,
+		);
+		let secondary = adjust_control(
+			VmxControl::ProcessorBased2,
+			SecondaryControls::ENABLE_EPT.bits() as u64,
+		);
+		// The guest runs in long mode; the host resumes in long mode. The
+		// "load/save debug controls" bits are part of the default1 set; even
+		// though the TRUE capability MSRs allow clearing them, KVM rejects
+		// VM-entry/exit controls with them cleared, so request them explicitly.
+		let entry = adjust_control(
+			VmxControl::VmEntry,
+			(EntryControls::IA32E_MODE_GUEST | EntryControls::LOAD_DEBUG_CONTROLS).bits() as u64,
+		);
+		let exit = adjust_control(
+			VmxControl::VmExit,
+			(ExitControls::HOST_ADDRESS_SPACE_SIZE | ExitControls::SAVE_DEBUG_CONTROLS).bits() as u64,
+		);
+
+		debug!(
+			"VMX controls: pin={pinbased:#x} proc={procbased:#x} secondary={secondary:#x} entry={entry:#x} exit={exit:#x} eptp={eptp:#x}"
+		);
+
 		unsafe {
-			vmwrite(guest::CS_ACCESS_RIGHTS, 0x209B)?;
-			vmwrite(guest::SS_ACCESS_RIGHTS, 0x4093)?;
-			vmwrite(guest::DS_ACCESS_RIGHTS, 0x4093)?;
-			vmwrite(guest::ES_ACCESS_RIGHTS, 0x4093)?;
-			vmwrite(guest::FS_ACCESS_RIGHTS, 0x4093)?;
-			vmwrite(guest::GS_ACCESS_RIGHTS, 0x4093)?;
-			vmwrite(guest::TR_ACCESS_RIGHTS, 0x8b)?;
-			vmwrite(guest::TR_LIMIT, 0xffff)?;
-			vmwrite(guest::LDTR_ACCESS_RIGHTS, 0x82)?;
-			vmwrite(guest::LDTR_LIMIT, 0xffff)?;
-			vmwrite(guest::GDTR_BASE, crate::GDT_OFFSET)?;
-			vmwrite(
-				guest::GDTR_LIMIT,
-				((core::mem::size_of::<u64>() * crate::BOOT_GDT_MAX) - 1) as u64,
-			)?;
-			vmwrite(guest::IDTR_LIMIT, 0xffff)?;
-			vmwrite(
-				guest::CS_SELECTOR,
-				SegmentSelector::new(crate::GDT_KERNEL_CODE, PrivilegeLevel::Ring0).0 as u64,
-			)?;
-			vmwrite(
-				guest::DS_SELECTOR,
-				SegmentSelector::new(crate::GDT_KERNEL_DATA, PrivilegeLevel::Ring0).0 as u64,
-			)?;
-			vmwrite(
-				guest::ES_SELECTOR,
-				SegmentSelector::new(crate::GDT_KERNEL_DATA, PrivilegeLevel::Ring0).0 as u64,
-			)?;
-			vmwrite(
-				guest::SS_SELECTOR,
-				SegmentSelector::new(crate::GDT_KERNEL_DATA, PrivilegeLevel::Ring0).0 as u64,
-			)?;
-			vmwrite(
-				guest::FS_SELECTOR,
-				SegmentSelector::new(crate::GDT_KERNEL_DATA, PrivilegeLevel::Ring0).0 as u64,
-			)?;
-			vmwrite(
-				guest::GS_SELECTOR,
-				SegmentSelector::new(crate::GDT_KERNEL_DATA, PrivilegeLevel::Ring0).0 as u64,
-			)?;
+			vmwrite(control::PINBASED_EXEC_CONTROLS, pinbased)?;
+			vmwrite(control::PRIMARY_PROCBASED_EXEC_CONTROLS, procbased)?;
+			vmwrite(control::SECONDARY_PROCBASED_EXEC_CONTROLS, secondary)?;
+			vmwrite(control::VMENTRY_CONTROLS, entry)?;
+			vmwrite(control::VMEXIT_CONTROLS, exit)?;
+			vmwrite(control::EPTP_FULL, eptp)?;
+
+			// Explicitly clear the count, threshold and bitmap-related control
+			// fields. After VMCLEAR these are not guaranteed to be zero, and a
+			// stray non-zero MSR-load/store or CR3-target count makes VM-entry
+			// fail with "invalid control field(s)".
+			vmwrite(control::VMENTRY_MSR_LOAD_COUNT, 0)?;
+			vmwrite(control::VMEXIT_MSR_LOAD_COUNT, 0)?;
+			vmwrite(control::VMEXIT_MSR_STORE_COUNT, 0)?;
+			vmwrite(control::VMENTRY_INTERRUPTION_INFO_FIELD, 0)?;
+			vmwrite(control::CR3_TARGET_COUNT, 0)?;
+			vmwrite(control::EXCEPTION_BITMAP, 0)?;
+			vmwrite(control::PAGE_FAULT_ERR_CODE_MASK, 0)?;
+			vmwrite(control::PAGE_FAULT_ERR_CODE_MATCH, 0)?;
+			vmwrite(control::TPR_THRESHOLD, 0)?;
 		}
 
 		Ok(())
 	}
 
-	pub fn setup_capabilities(&mut self) -> Result<(), HypervisorError> {
-		let cap = vmread(control::PINBASED_EXEC_CONTROLS)?;
-		CAP_PINBASED
-			.set(cap2ctrl(
-				cap,
-				(control::PinbasedControls::EXTERNAL_INTERRUPT_EXITING
-					| control::PinbasedControls::NMI_EXITING
-					| control::PinbasedControls::VIRTUAL_NMIS)
-					.bits() as u64,
-			))
-			.unwrap();
-		info!("CAP_PINBASED 0x{:x}", CAP_PINBASED.get().unwrap());
+	/// Configures the host-state area from the current (hermit) host state.
+	///
+	/// On VM-exit the processor reloads these registers, so they must describe
+	/// the environment `rhyve` continues running in. Host RSP and RIP are not
+	/// set here; the [`run_vmx_vm`](crate::vmx::run::run_vmx_vm) trampoline
+	/// writes them right before `VMLAUNCH`.
+	pub fn setup_host(&mut self) -> Result<(), HypervisorError> {
+		let gdt = sgdt();
+		let idt = sidt();
+		let tr_selector = read_tr_selector();
+		let tr_base = tss_base(gdt.base.as_u64(), tr_selector);
 
-		let cap: u64 = vmread(control::PRIMARY_PROCBASED_EXEC_CONTROLS)?;
-		info!("cap 0x{:x}", cap);
+		// RPL/TI bits must be zero for host segment selectors.
+		const SELECTOR_MASK: u16 = 0xFFF8;
 
-		let cap: u64 = vmread(control::SECONDARY_PROCBASED_EXEC_CONTROLS)?;
-		info!("cap 0x{:x}", cap);
+		unsafe {
+			vmwrite(host::CR0, Cr0::read_raw())?;
+			vmwrite(host::CR3, Cr3::read().0.start_address().as_u64())?;
+			vmwrite(host::CR4, Cr4::read_raw())?;
 
-		let cap: u64 = vmread(control::SECONDARY_PROCBASED_EXEC_CONTROLS)?;
-		info!("cap 0x{:x}", cap);
+			vmwrite(host::CS_SELECTOR, (CS::get_reg().0 & SELECTOR_MASK) as u64)?;
+			vmwrite(host::SS_SELECTOR, (SS::get_reg().0 & SELECTOR_MASK) as u64)?;
+			vmwrite(host::DS_SELECTOR, (DS::get_reg().0 & SELECTOR_MASK) as u64)?;
+			vmwrite(host::ES_SELECTOR, (ES::get_reg().0 & SELECTOR_MASK) as u64)?;
+			vmwrite(host::FS_SELECTOR, (FS::get_reg().0 & SELECTOR_MASK) as u64)?;
+			vmwrite(host::GS_SELECTOR, (GS::get_reg().0 & SELECTOR_MASK) as u64)?;
+			vmwrite(host::TR_SELECTOR, (tr_selector & SELECTOR_MASK) as u64)?;
 
-		let cap: u64 = vmread(control::SECONDARY_PROCBASED_EXEC_CONTROLS)?;
-		info!("cap 0x{:x}", cap);
+			vmwrite(host::FS_BASE, Msr::new(IA32_FS_BASE).read())?;
+			vmwrite(host::GS_BASE, Msr::new(IA32_GS_BASE).read())?;
+			vmwrite(host::TR_BASE, tr_base)?;
+			vmwrite(host::GDTR_BASE, gdt.base.as_u64())?;
+			vmwrite(host::IDTR_BASE, idt.base.as_u64())?;
+
+			vmwrite(host::IA32_SYSENTER_CS, Msr::new(IA32_SYSENTER_CS).read())?;
+			vmwrite(host::IA32_SYSENTER_ESP, Msr::new(IA32_SYSENTER_ESP).read())?;
+			vmwrite(host::IA32_SYSENTER_EIP, Msr::new(IA32_SYSENTER_EIP).read())?;
+		}
 
 		Ok(())
 	}
 
-	pub fn setup_system_64bit(&mut self) -> Result<(), HypervisorError> {
+	/// Configures the guest-state area for a freshly booted 64-bit kernel.
+	///
+	/// Segment selectors refer to the boot GDT that `rhyve` writes into guest
+	/// memory; all segment bases are flat (0) with a 1 MiB byte-granular limit
+	/// (segment limits are ignored in 64-bit mode anyway). `entry_point` and
+	/// `rsp` become the guest's initial RIP and RSP.
+	pub fn setup_guest(&mut self, entry_point: u64, rsp: u64) -> Result<(), HypervisorError> {
+		let code = SegmentSelector::new(crate::GDT_KERNEL_CODE, PrivilegeLevel::Ring0).0 as u64;
+		let data = SegmentSelector::new(crate::GDT_KERNEL_DATA, PrivilegeLevel::Ring0).0 as u64;
+
+		// Access rights: present 64-bit code (0xA09B), present data (0xC093),
+		// busy 64-bit TSS (0x008B) and an unusable LDTR (bit 16 set).
+		const CS_AR: u64 = 0xA09B;
+		const DATA_AR: u64 = 0xC093;
+		const TR_AR: u64 = 0x008B;
+		const LDTR_AR: u64 = 1 << 16;
+		// Flat segment: byte-granular 4 GiB limit expressed with G = 1.
+		const SEG_LIMIT: u64 = 0xFFFF_FFFF;
+
 		let cr0 = Cr0Flags::PROTECTED_MODE_ENABLE
 			| Cr0Flags::EXTENSION_TYPE
 			| Cr0Flags::NUMERIC_ERROR
@@ -797,6 +924,69 @@ impl Vmcs {
 		let cr4 = Cr4Flags::PHYSICAL_ADDRESS_EXTENSION | Cr4Flags::VIRTUAL_MACHINE_EXTENSIONS;
 
 		unsafe {
+			// Selectors.
+			vmwrite(guest::CS_SELECTOR, code)?;
+			vmwrite(guest::SS_SELECTOR, data)?;
+			vmwrite(guest::DS_SELECTOR, data)?;
+			vmwrite(guest::ES_SELECTOR, data)?;
+			vmwrite(guest::FS_SELECTOR, data)?;
+			vmwrite(guest::GS_SELECTOR, data)?;
+			vmwrite(guest::TR_SELECTOR, 0)?;
+			vmwrite(guest::LDTR_SELECTOR, 0)?;
+
+			// Access rights.
+			vmwrite(guest::CS_ACCESS_RIGHTS, CS_AR)?;
+			vmwrite(guest::SS_ACCESS_RIGHTS, DATA_AR)?;
+			vmwrite(guest::DS_ACCESS_RIGHTS, DATA_AR)?;
+			vmwrite(guest::ES_ACCESS_RIGHTS, DATA_AR)?;
+			vmwrite(guest::FS_ACCESS_RIGHTS, DATA_AR)?;
+			vmwrite(guest::GS_ACCESS_RIGHTS, DATA_AR)?;
+			vmwrite(guest::TR_ACCESS_RIGHTS, TR_AR)?;
+			vmwrite(guest::LDTR_ACCESS_RIGHTS, LDTR_AR)?;
+
+			// Bases (flat) and limits.
+			for base in [
+				guest::CS_BASE,
+				guest::SS_BASE,
+				guest::DS_BASE,
+				guest::ES_BASE,
+				guest::FS_BASE,
+				guest::GS_BASE,
+				guest::LDTR_BASE,
+				guest::TR_BASE,
+			] {
+				vmwrite(base, 0)?;
+			}
+			// Code/data segments use page granularity (G = 1), so a 4 GiB limit
+			// is valid. TR/LDTR are byte-granular (G = 0); their limit must keep
+			// bits 31:20 clear, hence a 16-bit limit.
+			for limit in [
+				guest::CS_LIMIT,
+				guest::SS_LIMIT,
+				guest::DS_LIMIT,
+				guest::ES_LIMIT,
+				guest::FS_LIMIT,
+				guest::GS_LIMIT,
+			] {
+				vmwrite(limit, SEG_LIMIT)?;
+			}
+			vmwrite(guest::TR_LIMIT, 0xFFFF)?;
+			vmwrite(guest::LDTR_LIMIT, 0xFFFF)?;
+
+			// Descriptor tables: the boot GDT lives in guest memory, the guest
+			// starts without an IDT.
+			vmwrite(guest::GDTR_BASE, crate::GDT_OFFSET)?;
+			vmwrite(
+				guest::GDTR_LIMIT,
+				((core::mem::size_of::<u64>() * crate::BOOT_GDT_MAX) - 1) as u64,
+			)?;
+			vmwrite(guest::IDTR_BASE, 0)?;
+			vmwrite(guest::IDTR_LIMIT, 0xFFFF)?;
+
+			// Control registers and EFER (long mode enabled and active).
+			vmwrite(guest::CR0, cr0.bits())?;
+			vmwrite(guest::CR3, crate::BOOT_PML4)?;
+			vmwrite(guest::CR4, cr4.bits())?;
 			vmwrite(guest::IA32_EFER_FULL, crate::EFER_LME | crate::EFER_LMA)?;
 			vmwrite(
 				control::CR0_GUEST_HOST_MASK,
@@ -805,27 +995,51 @@ impl Vmcs {
 			vmwrite(control::CR0_READ_SHADOW, cr0.bits())?;
 			vmwrite(control::CR4_GUEST_HOST_MASK, cr4.bits())?;
 			vmwrite(control::CR4_READ_SHADOW, cr4.bits())?;
-			vmwrite(guest::CR0, cr0.bits())?;
-			vmwrite(guest::CR4, cr4.bits())?;
-			vmwrite(guest::CR3, crate::BOOT_PML4)?;
+
+			// Initial RIP/RSP/RFLAGS and remaining guest state.
+			vmwrite(guest::RIP, entry_point)?;
+			vmwrite(guest::RSP, rsp)?;
+			vmwrite(guest::RFLAGS, 0x2)?; // only the reserved bit 1 is set
+			vmwrite(guest::DR7, 0x400)?;
+			vmwrite(guest::IA32_DEBUGCTL_FULL, 0)?;
+			vmwrite(guest::IA32_SYSENTER_CS, 0)?;
+			vmwrite(guest::IA32_SYSENTER_ESP, 0)?;
+			vmwrite(guest::IA32_SYSENTER_EIP, 0)?;
+			vmwrite(guest::ACTIVITY_STATE, 0)?;
+			vmwrite(guest::INTERRUPTIBILITY_STATE, 0)?;
+			vmwrite(guest::PENDING_DBG_EXCEPTIONS, 0)?;
+			vmwrite(guest::LINK_PTR_FULL, u64::MAX)?;
 		}
-		/*
-
-		self.vcpu.write_vmcs(
-			VMCS_CTRL_CR0_MASK,
-			(Cr0Flags::CACHE_DISABLE | Cr0Flags::NOT_WRITE_THROUGH | cr0).bits(),
-		)?;
-		self.vcpu.write_vmcs(VMCS_CTRL_CR0_SHADOW, cr0.bits())?;
-		self.vcpu.write_vmcs(VMCS_CTRL_CR4_MASK, cr4.bits())?;
-		self.vcpu.write_vmcs(VMCS_CTRL_CR4_SHADOW, cr4.bits())?;
-
-		self.vcpu.write_register(&Register::CR0, cr0.bits())?;
-		self.vcpu.write_register(&Register::CR4, cr4.bits())?;
-		self.vcpu
-			.write_register(&Register::CR3, BOOT_PML4.as_u64())?;
-		*/
 
 		Ok(())
+	}
+
+	/// Writes the cached guest RIP/RSP/RFLAGS into the VMCS before a VM-entry.
+	pub fn load_guest_registers(&self, regs: &GuestRegisters) -> Result<(), HypervisorError> {
+		unsafe {
+			vmwrite(guest::RIP, regs.rip)?;
+			vmwrite(guest::RSP, regs.rsp)?;
+			vmwrite(guest::RFLAGS, regs.rflags)?;
+		}
+		Ok(())
+	}
+
+	/// Reads RIP/RSP/RFLAGS from the VMCS into the cached guest registers after a VM-exit.
+	pub fn save_guest_registers(&self, regs: &mut GuestRegisters) -> Result<(), HypervisorError> {
+		regs.rip = vmread(guest::RIP)?;
+		regs.rsp = vmread(guest::RSP)?;
+		regs.rflags = vmread(guest::RFLAGS)?;
+		Ok(())
+	}
+
+	/// Returns the 32-bit VM-exit reason field.
+	pub fn exit_reason(&self) -> Result<u32, HypervisorError> {
+		Ok(vmread(ro::EXIT_REASON)? as u32)
+	}
+
+	/// Returns the VM-instruction error field (valid after a failed VMX instruction).
+	pub fn instruction_error(&self) -> Result<u64, HypervisorError> {
+		vmread(ro::VM_INSTRUCTION_ERROR)
 	}
 }
 
