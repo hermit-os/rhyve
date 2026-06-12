@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::error::HypervisorError;
@@ -16,18 +17,33 @@ pub struct VmConfig {
 	pub guest_size: usize,
 }
 
+/// Nested paging that maps a guest-physical address space onto host-physical
+/// memory, independent of the virtualization extension.
+///
+/// Implemented by the concrete structures of each backend ([`Ept`] for Intel
+/// VT-x; AMD-V nested page tables would implement it likewise). The trait is
+/// object-safe so a [`Vm`] can own a `Box<dyn NestedPaging>` and the paging
+/// scheme can be chosen alongside the vCPU backend.
+pub trait NestedPaging {
+	/// Returns the nested-paging pointer addressing this guest-physical address
+	/// space (the EPT pointer on Intel VT-x, the nested CR3 on AMD-V), ready to
+	/// be stored in a vCPU's control structure.
+	fn pointer(&self) -> Result<u64, HypervisorError>;
+}
+
 /// A virtual machine: the guest's physical address space plus the set of virtual
 /// CPUs that execute within it.
 ///
-/// The Extended Page Tables are built once and owned here; every [`Cpu`] of this
-/// VM shares them through the EPT pointer ([`Ept::eptp`]). This is what lets a
-/// single VM manage several vCPUs over one guest-physical address space.
+/// The nested page tables are built once and owned here; every [`Cpu`] of this
+/// VM shares them through the nested-paging pointer ([`NestedPaging::pointer`]).
+/// This is what lets a single VM manage several vCPUs over one guest-physical
+/// address space, regardless of the active backend.
 pub struct Vm {
 	/// Id of the virtual machine instance.
 	id: VmId,
-	/// Extended Page Tables mapping the guest-physical address space, shared by
-	/// all vCPUs of this VM.
-	ept: Ept,
+	/// Nested page tables mapping the guest-physical address space, shared by all
+	/// vCPUs of this VM.
+	paging: Box<dyn NestedPaging>,
 	/// The virtual CPUs managed by this VM.
 	cpus: Vec<Cpu>,
 }
@@ -42,15 +58,19 @@ pub trait VirtualMachine: Sized {
 impl VirtualMachine for Vm {
 	type Config = VmConfig;
 
-	/// Creates a virtual machine and builds the Extended Page Tables that map its
+	/// Creates a virtual machine and builds the nested page tables that map its
 	/// guest-physical address space. No vCPU exists yet; add them with
 	/// [`Vm::create_cpu`].
 	fn new(id: VmId, config: Self::Config) -> Result<Self, HypervisorError> {
-		let ept = Ept::new(config.guest_base, config.guest_size)?;
+		// Backend-selection point: today only Intel VT-x EPT is supported. A
+		// future implementation can pick the paging scheme here based on the CPU
+		// vendor, matching the vCPU backend chosen in `Cpu::new`.
+		let paging: Box<dyn NestedPaging> =
+			Box::new(Ept::new(config.guest_base, config.guest_size)?);
 
 		Ok(Self {
 			id,
-			ept,
+			paging,
 			cpus: Vec::new(),
 		})
 	}
@@ -65,16 +85,16 @@ impl Vm {
 
 	/// Adds a virtual CPU to this VM and returns a mutable reference to it.
 	///
-	/// The new vCPU shares this VM's EPT and starts executing at `entry_point`
-	/// with `stack_pointer` as its initial stack. Its id is assigned in creation
-	/// order, starting at 0 for the boot CPU.
+	/// The new vCPU shares this VM's nested page tables and starts executing at
+	/// `entry_point` with `stack_pointer` as its initial stack. Its id is assigned
+	/// in creation order, starting at 0 for the boot CPU.
 	pub fn create_cpu(
 		&mut self,
 		entry_point: u64,
 		stack_pointer: u64,
 	) -> Result<&mut Cpu, HypervisorError> {
 		let config = CpuConfig {
-			eptp: self.ept.eptp()?,
+			nested_paging_pointer: self.paging.pointer()?,
 			entry_point,
 			stack_pointer,
 		};

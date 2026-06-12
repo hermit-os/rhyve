@@ -22,6 +22,7 @@ use hermit::arch::{BasePageSize, PageSize};
 use hermit::mm::{VirtAddr, virtual_to_physical};
 
 use crate::error::HypervisorError;
+use crate::vm::NestedPaging;
 
 /// Number of entries in a paging-structure table.
 const ENTRY_COUNT: usize = 512;
@@ -132,5 +133,11 @@ impl Ept {
 	pub fn eptp(&self) -> Result<u64, HypervisorError> {
 		let pml4 = host_physical((&*self.pml4 as *const Table).cast())?;
 		Ok(pml4 | EPT_WALK_LENGTH_4 | EPT_POINTER_MEMORY_TYPE_WB)
+	}
+}
+
+impl NestedPaging for Ept {
+	fn pointer(&self) -> Result<u64, HypervisorError> {
+		self.eptp()
 	}
 }

@@ -19,6 +19,7 @@ use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
 
 use crate::error::HypervisorError;
+use crate::vcpu::{ExitReason, VcpuBackend};
 use crate::vmx::run::run_vmx_vm;
 use crate::vmx::vmcs::Vmcs;
 use crate::vmx::vmxon::Vmxon;
@@ -203,47 +204,6 @@ impl VmxCpu {
 		self.vmx_capture_status()
 	}
 
-	/// Executes the vCPU until a VM-exit occurs.
-	///
-	/// Loads this vCPU's VMCS, restores the guest registers and performs a
-	/// VMLAUNCH/VMRESUME. On VM-exit the guest register state is captured and the
-	/// exit reason is decoded.
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(VmxBasicExitReason)` indicating the reason for the VM-exit, or an `Err(HypervisorError)`
-	/// if the VM fails to launch or an unknown exit reason is encountered.
-	pub fn run(&mut self) -> Result<VmxBasicExitReason, HypervisorError> {
-		// Make sure this vCPU's VMCS is the current one on this core.
-		self.activate()?;
-
-		// Mirror the cached RIP/RSP/RFLAGS into the VMCS so a VMRESUME continues
-		// where the previous VM-exit left off.
-		self.vmcs_region.load_guest_registers(&self.regs)?;
-
-		// Enter the guest. Returns the RFLAGS produced by VMLAUNCH/VMRESUME.
-		let flags = unsafe { run_vmx_vm(&mut self.regs) };
-		self.launched = true;
-
-		// A set ZF (VMfailValid) or CF (VMfailInvalid) means VM-entry failed and
-		// no VM-exit occurred.
-		let rflags = RFlags::from_bits_truncate(flags);
-		if rflags.contains(RFlags::ZERO_FLAG) || rflags.contains(RFlags::CARRY_FLAG) {
-			let error = self.vmcs_region.instruction_error().unwrap_or(0);
-			return Err(HypervisorError::VMEntryFailed(error));
-		}
-
-		// VM-exit occurred: refresh the cached RIP/RSP/RFLAGS and decode the reason.
-		self.vmcs_region.save_guest_registers(&mut self.regs)?;
-		let reason = self.vmcs_region.exit_reason()?;
-		VmxBasicExitReason::from_u32(reason).ok_or(HypervisorError::UnknownVMExitReason)
-	}
-
-	/// Returns the cached guest register state captured at the last VM-exit.
-	pub fn guest_registers(&self) -> &GuestRegisters {
-		&self.regs
-	}
-
 	/// Creates and fully initializes the VT-x backend of a vCPU.
 	///
 	/// `eptp` is the VM-wide EPT pointer, `cpu_id` becomes the guest's RSI (CPU
@@ -280,6 +240,45 @@ impl VmxCpu {
 		cpu.setup_vmcs(eptp)?;
 
 		Ok(cpu)
+	}
+}
+
+impl VcpuBackend for VmxCpu {
+	/// Executes the vCPU until a VM-exit occurs.
+	///
+	/// Loads this vCPU's VMCS, restores the guest registers and performs a
+	/// VMLAUNCH/VMRESUME. On VM-exit the guest register state is captured and the
+	/// exit reason is decoded.
+	fn run(&mut self) -> Result<ExitReason, HypervisorError> {
+		// Make sure this vCPU's VMCS is the current one on this core.
+		self.activate()?;
+
+		// Mirror the cached RIP/RSP/RFLAGS into the VMCS so a VMRESUME continues
+		// where the previous VM-exit left off.
+		self.vmcs_region.load_guest_registers(&self.regs)?;
+
+		// Enter the guest. Returns the RFLAGS produced by VMLAUNCH/VMRESUME.
+		let flags = unsafe { run_vmx_vm(&mut self.regs) };
+		self.launched = true;
+
+		// A set ZF (VMfailValid) or CF (VMfailInvalid) means VM-entry failed and
+		// no VM-exit occurred.
+		let rflags = RFlags::from_bits_truncate(flags);
+		if rflags.contains(RFlags::ZERO_FLAG) || rflags.contains(RFlags::CARRY_FLAG) {
+			let error = self.vmcs_region.instruction_error().unwrap_or(0);
+			return Err(HypervisorError::VMEntryFailed(error));
+		}
+
+		// VM-exit occurred: refresh the cached RIP/RSP/RFLAGS and decode the reason.
+		self.vmcs_region.save_guest_registers(&mut self.regs)?;
+		let reason = self.vmcs_region.exit_reason()?;
+		let basic =
+			VmxBasicExitReason::from_u32(reason).ok_or(HypervisorError::UnknownVMExitReason)?;
+		Ok(ExitReason::Vmx(basic))
+	}
+
+	fn guest_registers(&self) -> &GuestRegisters {
+		&self.regs
 	}
 }
 
