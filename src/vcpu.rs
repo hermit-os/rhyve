@@ -38,6 +38,8 @@ pub enum ExitReason {
 	Success,
 	/// I/O ports access
 	IoInstruction(u64),
+	/// Shutdown system
+	Shutdown,
 }
 
 /// A swappable per-vCPU virtualization backend.
@@ -103,7 +105,7 @@ pub trait VCpu: Sized {
 
 impl VCpu for Cpu {
 	type VCpuConfig = CpuConfig;
-	type VCpuExitReasons = ExitReason;
+	type VCpuExitReasons = ();
 
 	/// Creates a virtual CPU and its virtualization backend. The backend enables
 	/// virtualization, configures the VM control structures with the VM's
@@ -136,30 +138,36 @@ impl VCpu for Cpu {
 		}
 	}
 
-	fn run(&mut self) -> Result<ExitReason, HypervisorError> {
+	fn run(&mut self) -> Result<(), HypervisorError> {
 		loop {
 			let reason = self.backend.run()?;
 
-			if let ExitReason::IoInstruction(q) = reason {
-				let is_in = (q >> 3) & 1 != 0; // Bit 3: 0 = OUT, 1 = IN
-				let port = (q >> 16) as u16; // Bits 16–31: port number
+			match reason {
+				ExitReason::IoInstruction(q) => {
+					let is_in = (q >> 3) & 1 != 0; // Bit 3: 0 = OUT, 1 = IN
+					let port = (q >> 16) as u16; // Bits 16–31: port number
 
-				// Only the guest's serial port (8 consecutive ports from the base)
-				// is emulated; other I/O is swallowed.
-				let serial = (crate::SERIAL_BASE..crate::SERIAL_BASE + 8).contains(&port);
-				let offset = port.wrapping_sub(crate::SERIAL_BASE);
+					// Only the guest's serial port (8 consecutive ports from the base)
+					// is emulated; other I/O is swallowed.
+					let serial = (crate::SERIAL_BASE..crate::SERIAL_BASE + 8).contains(&port);
+					let offset = port.wrapping_sub(crate::SERIAL_BASE);
 
-				let rax = self.registers().rax;
-				if is_in {
-					let value = if serial {
-						self.uart.lock().read(offset)
-					} else {
-						0
-					};
-					self.registers_mut().rax = (rax & !0xff) | u64::from(value);
-				} else if serial && let Some(byte) = self.uart.lock().write(offset, rax as u8) {
-					print!("{}", byte as char);
+					let rax = self.registers().rax;
+					if is_in {
+						let value = if serial {
+							self.uart.lock().read(offset)
+						} else {
+							0
+						};
+						self.registers_mut().rax = (rax & !0xff) | u64::from(value);
+					} else if serial && let Some(byte) = self.uart.lock().write(offset, rax as u8) {
+						print!("{}", byte as char);
+					}
 				}
+				ExitReason::Shutdown => {
+					return Ok(());
+				}
+				_ => {}
 			}
 		}
 	}

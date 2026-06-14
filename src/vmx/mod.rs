@@ -367,6 +367,10 @@ impl VcpuBackend for VmxCpu {
 
 				Ok(ExitReason::IoInstruction(q))
 			}
+			VmxBasicExitReason::TripleFault => {
+				// Triple fault is used to shutdown the system
+				Ok(ExitReason::Shutdown)
+			}
 			_ => {
 				warn!("Unhandled exit reason at {:x}: {basic:?}", self.regs.rip);
 				Err(HypervisorError::UnknownVMExitReason)
