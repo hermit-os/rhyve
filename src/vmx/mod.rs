@@ -11,7 +11,6 @@ use core::mem::MaybeUninit;
 
 pub use ept::{Ept, Page};
 use hermit::mm::{VirtAddr, virtual_to_physical};
-use raw_cpuid::CpuId;
 pub use run::GuestRegisters;
 pub use vmerror::VmxBasicExitReason;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
@@ -384,33 +383,5 @@ impl VcpuBackend for VmxCpu {
 
 	fn guest_registers_mut(&mut self) -> &mut GuestRegisters {
 		&mut self.regs
-	}
-}
-
-/// Checks if the CPU is supported for hypervisor operation.
-///
-/// Verifies the CPU is Intel with VMX support and Memory Type Range Registers (MTRRs) support.
-///
-/// # Returns
-///
-/// Returns `Ok(())` if the CPU meets all requirements, otherwise returns `Err(HypervisorError)`.
-pub fn check_supported_cpu() -> Result<(), HypervisorError> {
-	let cpuid = CpuId::new();
-
-	if let Some(vf) = cpuid.get_vendor_info() {
-		if vf.as_str() != "GenuineIntel" {
-			return Err(HypervisorError::CPUUnsupported);
-		}
-	} else {
-		return Err(HypervisorError::CPUUnsupported);
-	}
-
-	if !cpuid
-		.get_feature_info()
-		.is_some_and(|finfo| finfo.has_vmx())
-	{
-		Err(HypervisorError::VMXUnsupported)
-	} else {
-		Ok(())
 	}
 }

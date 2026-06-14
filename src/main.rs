@@ -30,6 +30,7 @@ use hermit::syscalls::{sys_alloc, sys_get_processor_frequency};
 use hermit::time::SystemTime;
 use hermit_entry::boot_info::*;
 use hermit_entry::elf::{KernelObject, LoadedKernel};
+use raw_cpuid::CpuId;
 use time::OffsetDateTime;
 use x86_64::instructions::interrupts;
 
@@ -68,6 +69,51 @@ pub const BOOT_STACK_TOP: u64 = 0x70000;
 const PG_PRESENT: u64 = 1 << 0;
 const PG_RW: u64 = 1 << 1;
 const PG_HUGE: u64 = 1 << 7;
+
+/// HypervisorExtension indicates the support of hardware
+/// extension to accelerate a virtual machine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HypervisorExtension {
+	/// Support for Intel VT-x (VMX) is available.
+	Vmx,
+	/// Support for AMD-V (SVM) is available.
+	Svm,
+}
+
+/// Checks whether the CPU supports a hardware virtualization extension.
+///
+/// Detects Intel VT-x (`GenuineIntel` with the VMX feature bit) and AMD-V
+/// (`AuthenticAMD` with the SVM feature bit, CPUID `8000_0001h:ECX[2]`).
+///
+/// # Returns
+///
+/// Returns `Ok(HypervisorExtension)` indicating the supported extension, or
+/// `Err(HypervisorError::VmUnsupported)` if neither is available.
+pub fn check_supported_cpu() -> Result<HypervisorExtension, HypervisorError> {
+	let cpuid = CpuId::new();
+
+	if let Some(vf) = cpuid.get_vendor_info() {
+		match vf.as_str() {
+			"GenuineIntel"
+				if cpuid
+					.get_feature_info()
+					.is_some_and(|finfo| finfo.has_vmx()) =>
+			{
+				return Ok(HypervisorExtension::Vmx);
+			}
+			"AuthenticAMD"
+				if cpuid
+					.get_extended_processor_and_feature_identifiers()
+					.is_some_and(|finfo| finfo.has_svm()) =>
+			{
+				return Ok(HypervisorExtension::Svm);
+			}
+			_ => {}
+		}
+	}
+
+	Err(HypervisorError::VmUnsupported)
+}
 
 /// Initializes the guest's boot memory: a flat GDT and 4-level page tables that
 /// identity-map the first 1 GiB of guest-physical memory with 2 MiB pages.
@@ -224,7 +270,13 @@ extern "C" fn start_hypervisor(path: usize) {
 pub extern "C" fn runtime_entry(_argc: i32, _argv: *const *const u8, _env: *const *const u8) -> ! {
 	info!("Initialize rhyve");
 
-	vmx::check_supported_cpu().expect("VMX isn't supported");
+	if let Ok(result) = check_supported_cpu() {
+		if result == HypervisorExtension::Svm {
+			panic!("AMD-V is currently not supportedt");
+		}
+	} else {
+		panic!("CPU doesn't support any virtualization extensions!")
+	}
 
 	// mount guest image
 	mount_guest_image();

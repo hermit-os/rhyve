@@ -20,6 +20,8 @@ pub enum HypervisorError {
 	VMEntryFailed(u64),
 	#[error("Failed to allocate memory")]
 	AllocationFailed,
+	#[error("Hardware support is missing")]
+	VmUnsupported,
 	#[error("Unknown VM exit basic reason")]
 	UnknownVMExitReason,
 }
