@@ -4,16 +4,16 @@ mod vmcs;
 mod vmerror;
 mod vmxon;
 
-pub use ept::Ept;
-pub use run::GuestRegisters;
-pub use vmerror::VmxBasicExitReason;
-
 use alloc::boxed::Box;
 use core::arch::asm;
+use core::arch::x86_64::__cpuid_count;
 use core::mem::MaybeUninit;
 
+pub use ept::Ept;
 use hermit::mm::{VirtAddr, virtual_to_physical};
 use raw_cpuid::CpuId;
+pub use run::GuestRegisters;
+pub use vmerror::VmxBasicExitReason;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
@@ -21,7 +21,7 @@ use x86_64::registers::rflags::{self, RFlags};
 use crate::error::HypervisorError;
 use crate::vcpu::{ExitReason, VcpuBackend};
 use crate::vmx::run::run_vmx_vm;
-use crate::vmx::vmcs::Vmcs;
+use crate::vmx::vmcs::{Vmcs, guest, ro};
 use crate::vmx::vmxon::Vmxon;
 
 /// Reporting Register of Basic VMX Capabilities (R/O) See Table 35-2. See Appendix A.1, Basic VMX Information (If CPUID.01H:ECX.\[bit 9\])
@@ -143,10 +143,11 @@ impl VmxCpu {
 			});
 		}
 
-		let vmxon_addr =
-			virtual_to_physical(VirtAddr::from_ptr(self.vmxon_region.as_ref() as *const Vmxon))
-				.unwrap()
-				.as_u64();
+		let vmxon_addr = virtual_to_physical(VirtAddr::from_ptr(
+			self.vmxon_region.as_ref() as *const Vmxon
+		))
+		.unwrap()
+		.as_u64();
 		unsafe {
 			asm!("vmxon [{0}]", in(reg) &vmxon_addr);
 		}
@@ -186,7 +187,8 @@ impl VmxCpu {
 
 		self.vmcs_region.setup_controls(eptp)?;
 		self.vmcs_region.setup_host()?;
-		self.vmcs_region.setup_guest(self.entry_point, self.guest_rsp)
+		self.vmcs_region
+			.setup_guest(self.entry_point, self.guest_rsp)
 	}
 
 	/// Makes this vCPU's VMCS the current one on the executing core.
@@ -274,11 +276,99 @@ impl VcpuBackend for VmxCpu {
 		let reason = self.vmcs_region.exit_reason()?;
 		let basic =
 			VmxBasicExitReason::from_u32(reason).ok_or(HypervisorError::UnknownVMExitReason)?;
-		Ok(ExitReason::Vmx(basic))
+
+		match basic {
+			VmxBasicExitReason::Rdmsr => {
+				// `rcx` holds the MSR index, which must be mapped to the matching
+				// VMCS guest-state field — it is not itself a VMCS field encoding.
+				let value = match self.regs.rcx as u32 {
+					vmcs::IA32_FS_BASE => self.vmcs_region.read(guest::FS_BASE)?,
+					vmcs::IA32_GS_BASE => self.vmcs_region.read(guest::GS_BASE)?,
+					vmcs::IA32_EFER => self.vmcs_region.read(guest::IA32_EFER_FULL)?,
+					_ => 0, // unknown MSR: read as zero
+				};
+				self.regs.rax = value & 0xffff_ffff; // EAX = low
+				self.regs.rdx = value >> 32; // EDX = high
+
+				// Advance past the RDMSR instruction.
+				let len = self.vmcs_region.read(ro::VMEXIT_INSTRUCTION_LEN)?;
+				self.regs.rip += len;
+
+				Ok(ExitReason::Success)
+			}
+			VmxBasicExitReason::Wrmsr => {
+				let value = (self.regs.rdx << 32) | (self.regs.rax & 0xffff_ffff);
+				match self.regs.rcx as u32 {
+					vmcs::IA32_FS_BASE => self.vmcs_region.write(guest::FS_BASE, value)?,
+					vmcs::IA32_GS_BASE => self.vmcs_region.write(guest::GS_BASE, value)?,
+					vmcs::IA32_EFER => self.vmcs_region.write(guest::IA32_EFER_FULL, value)?,
+					_ => {} // ignorieren oder #GP
+				}
+
+				let len = self.vmcs_region.read(ro::VMEXIT_INSTRUCTION_LEN)?;
+				self.regs.rip += len;
+
+				Ok(ExitReason::Success)
+			}
+			VmxBasicExitReason::Cpuid => {
+				// Execute CPUID on behalf of the guest and pass the result back.
+				// `eax` selects the leaf, `ecx` the sub-leaf. (A real hypervisor
+				// would sanitize the result here, e.g. hide VMX and advertise its
+				// own presence; for now the host values are forwarded verbatim.)
+				let leaf = self.regs.rax as u32;
+				let subleaf = self.regs.rcx as u32;
+				let result = __cpuid_count(leaf, subleaf);
+
+				// Writing the 32-bit halves zero-extends into the 64-bit registers,
+				// matching CPUID's behaviour in 64-bit mode.
+				self.regs.rax = u64::from(result.eax);
+				self.regs.rbx = u64::from(result.ebx);
+				self.regs.rcx = u64::from(result.ecx);
+				self.regs.rdx = u64::from(result.edx);
+
+				let len = self.vmcs_region.read(ro::VMEXIT_INSTRUCTION_LEN)?;
+				self.regs.rip += len;
+
+				Ok(ExitReason::Success)
+			}
+			VmxBasicExitReason::Xsetbv => {
+				// XSETBV unconditionally causes a VM-exit, so execute it on behalf
+				// of the guest: `ecx` selects the XCR, `edx:eax` is the value.
+				let value = (self.regs.rdx << 32) | (self.regs.rax & 0xffff_ffff);
+				unsafe {
+					asm!(
+						"xsetbv",
+						in("ecx") self.regs.rcx as u32,
+						in("eax") value as u32,
+						in("edx") (value >> 32) as u32,
+					);
+				}
+
+				let len = self.vmcs_region.read(ro::VMEXIT_INSTRUCTION_LEN)?;
+				self.regs.rip += len;
+
+				Ok(ExitReason::Success)
+			}
+			VmxBasicExitReason::IoInstruction => {
+				let q = self.vmcs_region.read(ro::EXIT_QUALIFICATION)?;
+				let len = self.vmcs_region.read(ro::VMEXIT_INSTRUCTION_LEN)?;
+				self.regs.rip += len;
+
+				Ok(ExitReason::IoInstruction(q))
+			}
+			_ => {
+				warn!("Unhandled exit reason at {:x}: {basic:?}", self.regs.rip);
+				Err(HypervisorError::UnknownVMExitReason)
+			}
+		}
 	}
 
 	fn guest_registers(&self) -> &GuestRegisters {
 		&self.regs
+	}
+
+	fn guest_registers_mut(&mut self) -> &mut GuestRegisters {
+		&mut self.regs
 	}
 }
 

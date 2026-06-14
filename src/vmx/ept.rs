@@ -91,12 +91,23 @@ impl Ept {
 	/// size. The whole range has to fit into a single page-directory (1 GiB).
 	pub fn new(guest_base: *const u8, size: usize) -> Result<Self, HypervisorError> {
 		let page_size = BasePageSize::SIZE as usize;
-		assert_eq!(guest_base as usize % page_size, 0, "guest base must be page-aligned");
-		assert_eq!(size % page_size, 0, "guest size must be a multiple of the page size");
+		assert_eq!(
+			guest_base as usize % page_size,
+			0,
+			"guest base must be page-aligned"
+		);
+		assert_eq!(
+			size % page_size,
+			0,
+			"guest size must be a multiple of the page size"
+		);
 
 		let num_pages = size / page_size;
 		let num_pts = num_pages.div_ceil(ENTRY_COUNT);
-		assert!(num_pts <= ENTRY_COUNT, "guest larger than 1 GiB is not supported");
+		assert!(
+			num_pts <= ENTRY_COUNT,
+			"guest larger than 1 GiB is not supported"
+		);
 
 		let mut pml4 = alloc_table()?;
 		let mut pdpt = alloc_table()?;
@@ -104,8 +115,10 @@ impl Ept {
 		let mut pts = Vec::with_capacity(num_pts);
 
 		// PML4[0] -> PDPT, PDPT[0] -> PD: the whole guest fits in the first 1 GiB.
-		pml4.entries[0] = host_physical((&*pdpt as *const Table).cast())? | EPT_READ | EPT_WRITE | EPT_EXECUTE;
-		pdpt.entries[0] = host_physical((&*pd as *const Table).cast())? | EPT_READ | EPT_WRITE | EPT_EXECUTE;
+		pml4.entries[0] =
+			host_physical((&*pdpt as *const Table).cast())? | EPT_READ | EPT_WRITE | EPT_EXECUTE;
+		pdpt.entries[0] =
+			host_physical((&*pd as *const Table).cast())? | EPT_READ | EPT_WRITE | EPT_EXECUTE;
 
 		for i in 0..num_pts {
 			let mut pt = alloc_table()?;
@@ -120,11 +133,17 @@ impl Ept {
 				let hpa = host_physical(unsafe { guest_base.add(gpa) })?;
 				pt.entries[j] = hpa | EPT_READ | EPT_WRITE | EPT_EXECUTE | EPT_MEMORY_TYPE_WB;
 			}
-			pd.entries[i] = host_physical((&*pt as *const Table).cast())? | EPT_READ | EPT_WRITE | EPT_EXECUTE;
+			pd.entries[i] =
+				host_physical((&*pt as *const Table).cast())? | EPT_READ | EPT_WRITE | EPT_EXECUTE;
 			pts.push(pt);
 		}
 
-		Ok(Self { pml4, pdpt, pd, pts })
+		Ok(Self {
+			pml4,
+			pdpt,
+			pd,
+			pts,
+		})
 	}
 
 	/// Returns the EPT pointer (EPTP) value to store in the VMCS, i.e. the

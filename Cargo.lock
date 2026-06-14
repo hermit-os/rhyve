@@ -31,6 +31,12 @@ checksum = "cee078b3ed87e2621e0389729e2f032cc0408a4548768ced01678c9451c62237"
 
 [[package]]
 name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "allocator-api2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c583acf993cf4245c4acb0a2cc2ab1f9cc097de73411bb6d3647ff6af2b1013d"
@@ -579,6 +585,16 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2 0.2.21",
+]
+
+[[package]]
+name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -637,7 +653,7 @@ dependencies = [
  "fdt",
  "free-list",
  "fuse-abi",
- "hashbrown",
+ "hashbrown 0.17.1",
  "heapless",
  "hermit-entry",
  "hermit-macro",
@@ -1198,6 +1214,7 @@ dependencies = [
  "raw-cpuid",
  "thiserror-no-std",
  "time",
+ "vm-fdt",
  "x86_64",
 ]
 
@@ -1591,6 +1608,15 @@ dependencies = [
  "volatile-macro",
  "zerocopy",
  "zerocopy-derive",
+]
+
+[[package]]
+name = "vm-fdt"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e21282841a059bb62627ce8441c491f09603622cd5a21c43bfedc85a2952f23"
+dependencies = [
+ "hashbrown 0.14.5",
 ]
 
 [[package]]

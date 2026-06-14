@@ -7,6 +7,8 @@ extern crate alloc;
 extern crate hermit;
 
 mod error;
+mod fdt;
+mod uart;
 mod vcpu;
 mod vm;
 mod vmx;
@@ -32,13 +34,17 @@ use time::OffsetDateTime;
 use x86_64::instructions::interrupts;
 
 use crate::error::HypervisorError;
+use crate::fdt::Fdt;
 use crate::vcpu::VCpu;
-use crate::vm::{Vm, VirtualMachine, VmConfig};
+use crate::vm::{VirtualMachine, Vm, VmConfig};
 
 static GUEST: &[u8] = include_bytes!("../data/x86_64/hello_world");
 
+pub const SERIAL_BASE: u16 = 0x800;
+
 pub const BOOT_PML4: u64 = 0x10000;
 pub const BOOT_INFO_OFFSET: u64 = 0x9000;
+pub const FDT_OFFSET: u64 = 0x5000;
 pub const BOOT_GDT_NULL: usize = 0;
 pub const BOOT_GDT_CODE: usize = 1;
 pub const BOOT_GDT_DATA: usize = 2;
@@ -70,7 +76,8 @@ const PG_HUGE: u64 = 1 << 7;
 /// must already be present before the first instruction executes.
 fn init_guest_memory(guest_slice: &mut [MaybeUninit<u8>]) {
 	let base = guest_slice.as_mut_ptr() as *mut u8;
-	let write_entry = |off: u64, val: u64| unsafe { (base.add(off as usize) as *mut u64).write(val) };
+	let write_entry =
+		|off: u64, val: u64| unsafe { (base.add(off as usize) as *mut u64).write(val) };
 
 	// Boot GDT: null, 64-bit ring-0 code, ring-0 data.
 	write_entry(GDT_OFFSET, 0);
@@ -116,13 +123,12 @@ fn load_guest_image(
 	image: &str,
 	guest_slice: &mut [MaybeUninit<u8>],
 ) -> Result<LoadedKernel, HypervisorError> {
-	let meta = fs::metadata(image).map_err(|e| HypervisorError::IoError(e))?;
+	let meta = fs::metadata(image).map_err(HypervisorError::IoError)?;
 	let len = meta.len();
-	let mut file = File::open(image).map_err(|e| HypervisorError::IoError(e))?;
+	let mut file = File::open(image).map_err(HypervisorError::IoError)?;
 
 	let mut buffer = vec![0; len];
-	file.read(&mut buffer)
-		.map_err(|e| HypervisorError::IoError(e))?;
+	file.read(&mut buffer).map_err(HypervisorError::IoError)?;
 
 	let elf_kernel = KernelObject::parse(&buffer).map_err(|_| HypervisorError::ParseError)?;
 	let kernel_offset = 128 * BasePageSize::SIZE;
@@ -140,7 +146,7 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 	info!("Using image {image:?}");
 
 	// Create slice for the guest
-	let guest_size = 32768 * BasePageSize::SIZE as usize;
+	let guest_size = 256 << 20; // create image with a memory size of 256 MiB
 	let guest_ptr = sys_alloc(guest_size, BasePageSize::SIZE as usize) as *mut MaybeUninit<u8>;
 	let guest_slice: &mut [MaybeUninit<u8>] =
 		unsafe { &mut *slice_from_raw_parts_mut(guest_ptr, guest_size) };
@@ -156,8 +162,8 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 	let boot_info = BootInfo {
 		hardware_info: HardwareInfo {
 			phys_addr_range: 0..guest_size as u64,
-			serial_port_base: SerialPortBase::new(0x800),
-			device_tree: None,
+			serial_port_base: SerialPortBase::new(SERIAL_BASE),
+			device_tree: Some(NonZero::new(FDT_OFFSET).unwrap()),
 		},
 		load_info,
 		platform_info: PlatformInfo::Uhyve {
@@ -171,7 +177,18 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 		},
 	};
 
+	let fdt = Fdt::new("uhyve")
+		.unwrap()
+		.memory(0..guest_size as u64)
+		.unwrap()
+		.finish()
+		.unwrap();
+
 	unsafe {
+		guest_slice[FDT_OFFSET as usize..FDT_OFFSET as usize + fdt.len()]
+			.assume_init_mut()
+			.copy_from_slice(fdt.as_slice());
+
 		let raw_boot_info_ptr =
 			&mut guest_slice[BOOT_INFO_OFFSET as usize] as *mut _ as *mut RawBootInfo;
 		*raw_boot_info_ptr = RawBootInfo::from(boot_info);
@@ -192,17 +209,7 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 	)?;
 	let cpu = vm.create_cpu(loaded_kernel.entry_point, BOOT_STACK_TOP)?;
 
-	// Enter the guest and report the first VM-exit.
-	match cpu.run() {
-		Ok(reason) => {
-			let regs = cpu.registers();
-			info!(
-				"VM-exit: {reason} (guest RIP {:#x}, RSP {:#x})",
-				regs.rip, regs.rsp
-			);
-		}
-		Err(e) => error!("VM-entry failed: {e:?}"),
-	}
+	cpu.run()?;
 
 	Ok(())
 }

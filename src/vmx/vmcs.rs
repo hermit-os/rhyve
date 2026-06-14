@@ -19,9 +19,9 @@ use crate::vmx::run::GuestRegisters;
 use crate::vmx::vmcs::control::{EntryControls, ExitControls, PrimaryControls, SecondaryControls};
 
 /// IA32_FS_BASE model-specific register.
-const IA32_FS_BASE: u32 = 0xC000_0100;
+pub(crate) const IA32_FS_BASE: u32 = 0xC000_0100;
 /// IA32_GS_BASE model-specific register.
-const IA32_GS_BASE: u32 = 0xC000_0101;
+pub(crate) const IA32_GS_BASE: u32 = 0xC000_0101;
 /// IA32_SYSENTER_CS model-specific register.
 const IA32_SYSENTER_CS: u32 = 0x174;
 /// IA32_SYSENTER_ESP model-specific register.
@@ -29,7 +29,7 @@ const IA32_SYSENTER_ESP: u32 = 0x175;
 /// IA32_SYSENTER_EIP model-specific register.
 const IA32_SYSENTER_EIP: u32 = 0x176;
 /// IA32_EFER model-specific register.
-const IA32_EFER: u32 = 0xC000_0080;
+pub(crate) const IA32_EFER: u32 = 0xC000_0080;
 
 // VMX capability MSRs reporting allowed settings of the control fields.
 const IA32_VMX_PINBASED_CTLS: u32 = 0x481;
@@ -804,14 +804,23 @@ impl Vmcs {
 	pub fn setup_controls(&mut self, eptp: u64) -> Result<(), HypervisorError> {
 		// No pin-based controls are required for a minimal guest.
 		let pinbased = adjust_control(VmxControl::PinBased, 0);
-		// Activate the secondary controls so EPT can be enabled.
+		// Activate the secondary controls so EPT can be enabled, and make all I/O
+		// instructions cause a VM-exit so the guest's port I/O can be emulated.
 		let procbased = adjust_control(
 			VmxControl::ProcessorBased,
-			PrimaryControls::SECONDARY_CONTROLS.bits() as u64,
+			(PrimaryControls::SECONDARY_CONTROLS | PrimaryControls::UNCOND_IO_EXITING).bits()
+				as u64,
 		);
+		// Besides EPT, enable the instructions the guest expects to be usable
+		// because CPUID advertises them: without their secondary-control enable
+		// bit, RDTSCP/INVPCID/XSAVES raise #UD in the guest.
 		let secondary = adjust_control(
 			VmxControl::ProcessorBased2,
-			SecondaryControls::ENABLE_EPT.bits() as u64,
+			(SecondaryControls::ENABLE_EPT
+				| SecondaryControls::ENABLE_RDTSCP
+				| SecondaryControls::ENABLE_INVPCID
+				| SecondaryControls::ENABLE_XSAVES_XRSTORS)
+				.bits() as u64,
 		);
 		// The guest runs in long mode; the host resumes in long mode. The
 		// "load/save debug controls" bits are part of the default1 set; even
@@ -823,7 +832,8 @@ impl Vmcs {
 		);
 		let exit = adjust_control(
 			VmxControl::VmExit,
-			(ExitControls::HOST_ADDRESS_SPACE_SIZE | ExitControls::SAVE_DEBUG_CONTROLS).bits() as u64,
+			(ExitControls::HOST_ADDRESS_SPACE_SIZE | ExitControls::SAVE_DEBUG_CONTROLS).bits()
+				as u64,
 		);
 
 		debug!(
@@ -1040,6 +1050,20 @@ impl Vmcs {
 	/// Returns the VM-instruction error field (valid after a failed VMX instruction).
 	pub fn instruction_error(&self) -> Result<u64, HypervisorError> {
 		vmread(ro::VM_INSTRUCTION_ERROR)
+	}
+
+	/// Reads a VMCS `field` (e.g. one of the [`guest`], [`host`] or [`ro`]
+	/// encodings).
+	///
+	/// Note that `VMREAD` always operates on the VMCS that is *currently loaded*
+	/// on this core (the last one activated with `VMPTRLD`), so this only returns
+	/// this region's data while it is the active VMCS.
+	pub fn read(&self, field: u32) -> Result<u64, HypervisorError> {
+		vmread(field)
+	}
+
+	pub fn write(&self, field: u32, value: u64) -> Result<(), HypervisorError> {
+		unsafe { vmwrite(field, value) }
 	}
 }
 

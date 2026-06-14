@@ -26,6 +26,7 @@ hermit-entry = { version = "0.10.3", features = ["loader"] }
 hermit-sync = "0.1"
 time = { version = "0.3", default-features = false }
 embedded-io = { version = "0.7", features = ["alloc"] }
+vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [features]
 default = ["pci", "pci-ids", "fsgsbase", "kernel-stack", "acpi", "dns", "dhcpv4", "tcp", "udp", "virtio-net", "virtio-fs", "virtio-vsock"]

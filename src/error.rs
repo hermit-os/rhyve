@@ -6,8 +6,6 @@ pub enum HypervisorError {
 	IoError(hermit::errno::Errno),
 	#[error("Unable to parse ELF file")]
 	ParseError,
-	#[error("Invalid ELF file")]
-	InvalidElfFile,
 	#[error("Intel CPU not found")]
 	CPUUnsupported,
 	#[error("VMX is not supported")]

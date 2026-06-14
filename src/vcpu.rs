@@ -1,9 +1,13 @@
 use alloc::boxed::Box;
-use core::fmt;
+use alloc::sync::Arc;
+
+use hermit::print;
+use hermit_sync::SpinMutex;
 
 use crate::HypervisorError;
+use crate::uart::Uart;
 use crate::vm::VmId;
-use crate::vmx::{GuestRegisters, VmxBasicExitReason, VmxCpu};
+use crate::vmx::{GuestRegisters, VmxCpu};
 
 pub type VCpuId = usize;
 
@@ -25,21 +29,12 @@ pub struct CpuConfig {
 
 /// Reason a vCPU returned control to the hypervisor, independent of the
 /// underlying virtualization extension.
-///
-/// Each backend contributes its own variant; this keeps [`Cpu`] and its callers
-/// backend-agnostic while still exposing the native, fully detailed reason.
 #[derive(Debug, Clone, Copy)]
 pub enum ExitReason {
-	/// A VM-exit reported by the Intel VT-x backend.
-	Vmx(VmxBasicExitReason),
-}
-
-impl fmt::Display for ExitReason {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			ExitReason::Vmx(reason) => write!(f, "{reason}"),
-		}
-	}
+	/// Exit reason is already handled
+	Success,
+	/// I/O ports access
+	IoInstruction(u64),
 }
 
 /// A swappable per-vCPU virtualization backend.
@@ -55,6 +50,9 @@ pub trait VcpuBackend {
 
 	/// Returns the guest register state captured at the last VM-exit.
 	fn guest_registers(&self) -> &GuestRegisters;
+
+	/// Returns the mutable guest register state captured at the last VM-exit.
+	fn guest_registers_mut(&mut self) -> &mut GuestRegisters;
 }
 
 /// A virtual CPU belonging to a virtual machine.
@@ -70,6 +68,8 @@ pub struct Cpu {
 	vm_id: VmId,
 	/// Id of this vCPU within its virtual machine.
 	id: VCpuId,
+	/// Emulated serial port (16550 UART).
+	uart: Arc<SpinMutex<Uart>>,
 	/// The virtualization backend driving this vCPU.
 	backend: Box<dyn VcpuBackend>,
 }
@@ -79,7 +79,12 @@ pub trait VCpu: Sized {
 	type VCpuExitReasons;
 
 	// Create new Intialization instance
-	fn new(vm_id: VmId, vcpu_id: VCpuId, config: Self::VCpuConfig) -> Self;
+	fn new(
+		vm_id: VmId,
+		vcpu_id: VCpuId,
+		uart: Arc<SpinMutex<Uart>>,
+		config: Self::VCpuConfig,
+	) -> Self;
 
 	/// Executes the VM, running in a loop until a VM-exit occurs.
 	///
@@ -101,7 +106,12 @@ impl VCpu for Cpu {
 	/// virtualization, configures the VM control structures with the VM's
 	/// nested-paging pointer and seeds the guest registers from `config` (RIP at
 	/// the entry point, RSP at the initial stack).
-	fn new(vm_id: VmId, vcpu_id: VCpuId, config: Self::VCpuConfig) -> Self {
+	fn new(
+		vm_id: VmId,
+		vcpu_id: VCpuId,
+		uart: Arc<SpinMutex<Uart>>,
+		config: Self::VCpuConfig,
+	) -> Self {
 		// Backend-selection point: today only Intel VT-x is supported. A future
 		// implementation can pick the backend here based on the CPU vendor.
 		let backend: Box<dyn VcpuBackend> = Box::new(
@@ -117,12 +127,40 @@ impl VCpu for Cpu {
 		Self {
 			vm_id,
 			id: vcpu_id,
+			uart,
 			backend,
 		}
 	}
 
-	fn run(&mut self) -> Result<Self::VCpuExitReasons, HypervisorError> {
-		self.backend.run()
+	fn run(&mut self) -> Result<ExitReason, HypervisorError> {
+		loop {
+			let reason = self.backend.run()?;
+
+			match reason {
+				ExitReason::IoInstruction(q) => {
+					let is_in = (q >> 3) & 1 != 0; // Bit 3: 0 = OUT, 1 = IN
+					let port = (q >> 16) as u16; // Bits 16–31: port number
+
+					// Only the guest's serial port (8 consecutive ports from the base)
+					// is emulated; other I/O is swallowed.
+					let serial = (crate::SERIAL_BASE..crate::SERIAL_BASE + 8).contains(&port);
+					let offset = port.wrapping_sub(crate::SERIAL_BASE);
+
+					let rax = self.registers().rax;
+					if is_in {
+						let value = if serial {
+							self.uart.lock().read(offset)
+						} else {
+							0
+						};
+						self.registers_mut().rax = (rax & !0xff) | u64::from(value);
+					} else if serial && let Some(byte) = self.uart.lock().write(offset, rax as u8) {
+						print!("{}", byte as char);
+					}
+				}
+				_ => {}
+			}
+		}
 	}
 }
 
@@ -141,5 +179,10 @@ impl Cpu {
 	/// Returns the guest register state captured at the last VM-exit.
 	pub fn registers(&self) -> &GuestRegisters {
 		self.backend.guest_registers()
+	}
+
+	/// Returns the guest register state captured at the last VM-exit.
+	pub fn registers_mut(&mut self) -> &mut GuestRegisters {
+		self.backend.guest_registers_mut()
 	}
 }

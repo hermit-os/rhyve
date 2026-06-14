@@ -1,7 +1,11 @@
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use hermit_sync::SpinMutex;
+
 use crate::error::HypervisorError;
+use crate::uart::Uart;
 use crate::vcpu::{Cpu, CpuConfig, VCpu};
 use crate::vmx::Ept;
 
@@ -44,6 +48,8 @@ pub struct Vm {
 	/// Nested page tables mapping the guest-physical address space, shared by all
 	/// vCPUs of this VM.
 	paging: Box<dyn NestedPaging>,
+	/// Emulated serial port (16550 UART).
+	uart: Arc<SpinMutex<Uart>>,
 	/// The virtual CPUs managed by this VM.
 	cpus: Vec<Cpu>,
 }
@@ -71,6 +77,7 @@ impl VirtualMachine for Vm {
 		Ok(Self {
 			id,
 			paging,
+			uart: Arc::new(SpinMutex::new(Uart::new())),
 			cpus: Vec::new(),
 		})
 	}
@@ -99,7 +106,8 @@ impl Vm {
 			stack_pointer,
 		};
 		let vcpu_id = self.cpus.len();
-		self.cpus.push(Cpu::new(self.id, vcpu_id, config));
+		self.cpus
+			.push(Cpu::new(self.id, vcpu_id, self.uart.clone(), config));
 
 		Ok(self.cpus.last_mut().unwrap())
 	}
