@@ -9,7 +9,7 @@ use core::arch::asm;
 use core::arch::x86_64::__cpuid_count;
 use core::mem::MaybeUninit;
 
-pub use ept::Ept;
+pub use ept::{Ept, Page};
 use hermit::mm::{VirtAddr, virtual_to_physical};
 use raw_cpuid::CpuId;
 pub use run::GuestRegisters;
@@ -59,6 +59,11 @@ pub struct VmxCpu {
 	/// - Aligned to 4096 bytes (0x1000)
 	/// - Boxed for the same reason as [`Self::vmxon_region`].
 	vmcs_region: Box<Vmcs>,
+
+	/// Per-vCPU virtual-APIC page holding the virtualized local-APIC register
+	/// state for hardware APIC virtualization. Boxed for a stable physical
+	/// address, like the VMCS.
+	virtual_apic_page: Box<Page>,
 
 	/// Saved guest general-purpose registers.
 	regs: GuestRegisters,
@@ -167,8 +172,9 @@ impl VmxCpu {
 	}
 
 	/// Clears and loads the VMCS, then configures its control, host and guest
-	/// areas. `eptp` is the VM-wide EPT pointer shared by all vCPUs.
-	fn setup_vmcs(&mut self, eptp: u64) -> Result<(), HypervisorError> {
+	/// areas. `eptp` is the VM-wide EPT pointer shared by all vCPUs,
+	/// `apic_access_hpa` the host-physical address of the VM's APIC-access page.
+	fn setup_vmcs(&mut self, eptp: u64, apic_access_hpa: u64) -> Result<(), HypervisorError> {
 		let vmcs_addr =
 			virtual_to_physical(VirtAddr::from_ptr(self.vmcs_region.as_ref() as *const Vmcs))
 				.unwrap()
@@ -185,7 +191,10 @@ impl VmxCpu {
 		}
 		self.vmx_capture_status()?;
 
+		let virtual_apic_hpa = self.virtual_apic_page.host_physical()?;
 		self.vmcs_region.setup_controls(eptp)?;
+		self.vmcs_region
+			.setup_apic(virtual_apic_hpa, apic_access_hpa)?;
 		self.vmcs_region.setup_host()?;
 		self.vmcs_region
 			.setup_guest(self.entry_point, self.guest_rsp)
@@ -214,6 +223,7 @@ impl VmxCpu {
 	/// convention.
 	pub fn new(
 		eptp: u64,
+		apic_access_hpa: u64,
 		cpu_id: u64,
 		entry_point: u64,
 		guest_rsp: u64,
@@ -230,6 +240,7 @@ impl VmxCpu {
 		let mut cpu: VmxCpu = Self {
 			vmcs_region: Box::new(unsafe { MaybeUninit::zeroed().assume_init() }),
 			vmxon_region: Box::new(unsafe { MaybeUninit::zeroed().assume_init() }),
+			virtual_apic_page: Page::zeroed()?,
 			regs,
 			launched: false,
 			entry_point,
@@ -239,7 +250,7 @@ impl VmxCpu {
 		cpu.init()?;
 		// Enable VMX on this core and configure the VMCS.
 		cpu.setup_vmxon()?;
-		cpu.setup_vmcs(eptp)?;
+		cpu.setup_vmcs(eptp, apic_access_hpa)?;
 
 		Ok(cpu)
 	}

@@ -7,7 +7,7 @@ use hermit_sync::SpinMutex;
 use crate::error::HypervisorError;
 use crate::uart::Uart;
 use crate::vcpu::{Cpu, CpuConfig, VCpu};
-use crate::vmx::Ept;
+use crate::vmx::{Ept, Page};
 
 pub type VmId = usize;
 
@@ -33,7 +33,16 @@ pub trait NestedPaging {
 	/// space (the EPT pointer on Intel VT-x, the nested CR3 on AMD-V), ready to
 	/// be stored in a vCPU's control structure.
 	fn pointer(&self) -> Result<u64, HypervisorError>;
+
+	/// Maps a single 4 KiB guest-physical page to a host-physical page, e.g. to
+	/// back an MMIO region such as the APIC pages.
+	fn map_mmio(&mut self, gpa: u64, hpa: u64) -> Result<(), HypervisorError>;
 }
+
+/// Guest-physical base of the local APIC MMIO (default `IA32_APIC_BASE`).
+pub const LAPIC_BASE: u64 = 0xFEE0_0000;
+/// Guest-physical base of the I/O APIC MMIO.
+pub const IOAPIC_BASE: u64 = 0xFEC0_0000;
 
 /// A virtual machine: the guest's physical address space plus the set of virtual
 /// CPUs that execute within it.
@@ -50,6 +59,16 @@ pub struct Vm {
 	paging: Box<dyn NestedPaging>,
 	/// Emulated serial port (16550 UART).
 	uart: Arc<SpinMutex<Uart>>,
+	/// APIC-access page for hardware APIC virtualization, mapped at [`LAPIC_BASE`]
+	/// in the guest. Owned here so it stays alive while the EPT references it.
+	#[allow(dead_code)]
+	apic_access_page: Box<Page>,
+	/// Dummy page backing the (not yet emulated) I/O APIC MMIO, so guest accesses
+	/// do not fault. Owned here for the same reason.
+	#[allow(dead_code)]
+	ioapic_page: Box<Page>,
+	/// Host-physical address of the APIC-access page, handed to each vCPU.
+	apic_access_hpa: u64,
 	/// The virtual CPUs managed by this VM.
 	cpus: Vec<Cpu>,
 }
@@ -71,13 +90,25 @@ impl VirtualMachine for Vm {
 		// Backend-selection point: today only Intel VT-x EPT is supported. A
 		// future implementation can pick the paging scheme here based on the CPU
 		// vendor, matching the vCPU backend chosen in `Cpu::new`.
-		let paging: Box<dyn NestedPaging> =
+		let mut paging: Box<dyn NestedPaging> =
 			Box::new(Ept::new(config.guest_base, config.guest_size)?);
+
+		// Back the APIC MMIO regions: the local APIC via a dedicated APIC-access
+		// page (used by hardware APIC virtualization), the I/O APIC via a plain
+		// page so its accesses do not fault until it is emulated.
+		let apic_access_page = Page::zeroed()?;
+		let ioapic_page = Page::zeroed()?;
+		let apic_access_hpa = apic_access_page.host_physical()?;
+		paging.map_mmio(LAPIC_BASE, apic_access_hpa)?;
+		paging.map_mmio(IOAPIC_BASE, ioapic_page.host_physical()?)?;
 
 		Ok(Self {
 			id,
 			paging,
 			uart: Arc::new(SpinMutex::new(Uart::new())),
+			apic_access_page,
+			ioapic_page,
+			apic_access_hpa,
 			cpus: Vec::new(),
 		})
 	}
@@ -102,6 +133,7 @@ impl Vm {
 	) -> Result<&mut Cpu, HypervisorError> {
 		let config = CpuConfig {
 			nested_paging_pointer: self.paging.pointer()?,
+			apic_access_hpa: self.apic_access_hpa,
 			entry_point,
 			stack_pointer,
 		};

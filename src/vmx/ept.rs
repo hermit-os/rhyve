@@ -47,6 +47,34 @@ struct Table {
 	entries: [u64; ENTRY_COUNT],
 }
 
+/// A 4 KiB-aligned page, e.g. a backing page for an MMIO region (the APIC
+/// pages). Boxed so it keeps a stable host-physical address.
+#[repr(C, align(4096))]
+pub struct Page {
+	_data: [u8; BasePageSize::SIZE as usize],
+}
+
+impl Page {
+	/// Allocates a zeroed, page-aligned page on the heap.
+	pub fn zeroed() -> Result<Box<Self>, HypervisorError> {
+		let layout = Layout::new::<Page>();
+		// SAFETY: an all-zero byte pattern is valid for `Page` and the layout is
+		// non-zero sized.
+		let ptr = unsafe { alloc_zeroed(layout) }.cast::<Page>();
+		if ptr.is_null() {
+			return Err(HypervisorError::AllocationFailed);
+		}
+		// SAFETY: freshly allocated, aligned, zero-initialized allocation matching
+		// `Layout::new::<Page>()`.
+		Ok(unsafe { Box::from_raw(ptr) })
+	}
+
+	/// Returns the host-physical address backing this page.
+	pub fn host_physical(&self) -> Result<u64, HypervisorError> {
+		host_physical((self as *const Page).cast())
+	}
+}
+
 /// Allocates a zeroed, page-aligned [`Table`] on the heap.
 fn alloc_table() -> Result<Box<Table>, HypervisorError> {
 	let layout = Layout::new::<Table>();
@@ -81,6 +109,9 @@ pub struct Ept {
 	pd: Box<Table>,
 	/// Leaf page tables; one per 2 MiB of guest-physical memory.
 	pts: Vec<Box<Table>>,
+	/// Tables allocated on demand by [`Ept::map_page`] (e.g. for MMIO regions
+	/// such as the APIC pages), paired with their host-physical address.
+	extra: Vec<(u64, Box<Table>)>,
 }
 
 impl Ept {
@@ -143,7 +174,65 @@ impl Ept {
 			pdpt,
 			pd,
 			pts,
+			extra: Vec::new(),
 		})
+	}
+
+	/// Returns the child table referenced by `parent.entries[idx]`, allocating it
+	/// if the entry is not present yet. Used to build paths for MMIO mappings.
+	fn child_or_alloc(
+		&mut self,
+		parent: *mut Table,
+		idx: usize,
+	) -> Result<*mut Table, HypervisorError> {
+		let entry = unsafe { &mut (*parent).entries[idx] };
+		if *entry & EPT_READ != 0 {
+			let child_hpa = *entry & 0x000F_FFFF_FFFF_F000;
+			for (hpa, table) in &self.extra {
+				if *hpa == child_hpa {
+					return Ok((table.as_ref() as *const Table).cast_mut());
+				}
+			}
+			return Err(HypervisorError::AllocationFailed);
+		}
+
+		let table = alloc_table()?;
+		let ptr = (table.as_ref() as *const Table).cast_mut();
+		let hpa = host_physical(ptr.cast())?;
+		*entry = hpa | EPT_READ | EPT_WRITE | EPT_EXECUTE;
+		self.extra.push((hpa, table));
+		Ok(ptr)
+	}
+
+	/// Maps a single 4 KiB guest-physical page `gpa` to the host-physical page
+	/// `hpa`, allocating the intermediate tables as needed.
+	///
+	/// Intended for MMIO regions (e.g. the APIC pages) that lie *outside* the
+	/// contiguous guest RAM mapped by [`Ept::new`]: `gpa` must be below 512 GiB
+	/// and not within the first 1 GiB (whose PD is owned separately).
+	pub fn map_page(&mut self, gpa: u64, hpa: u64) -> Result<(), HypervisorError> {
+		assert_eq!(
+			(gpa >> 39) & 0x1ff,
+			0,
+			"guest-physical address must be below 512 GiB"
+		);
+		assert_ne!(
+			(gpa >> 30) & 0x1ff,
+			0,
+			"map_page is for addresses outside the first 1 GiB"
+		);
+
+		// pml4[0] -> pdpt already exists; start the walk at the PDPT.
+		let pdpt = (self.pdpt.as_ref() as *const Table).cast_mut();
+		let i3 = ((gpa >> 30) & 0x1ff) as usize;
+		let pd = self.child_or_alloc(pdpt, i3)?;
+		let i2 = ((gpa >> 21) & 0x1ff) as usize;
+		let pt = self.child_or_alloc(pd, i2)?;
+		let i1 = ((gpa >> 12) & 0x1ff) as usize;
+		unsafe {
+			(*pt).entries[i1] = hpa | EPT_READ | EPT_WRITE | EPT_EXECUTE | EPT_MEMORY_TYPE_WB;
+		}
+		Ok(())
 	}
 
 	/// Returns the EPT pointer (EPTP) value to store in the VMCS, i.e. the
@@ -158,5 +247,9 @@ impl Ept {
 impl NestedPaging for Ept {
 	fn pointer(&self) -> Result<u64, HypervisorError> {
 		self.eptp()
+	}
+
+	fn map_mmio(&mut self, gpa: u64, hpa: u64) -> Result<(), HypervisorError> {
+		self.map_page(gpa, hpa)
 	}
 }

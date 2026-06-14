@@ -21,6 +21,9 @@ pub struct CpuConfig {
 	/// Nested-paging pointer of the owning VM, shared by all of its vCPUs (the
 	/// EPT pointer on Intel VT-x, the nested CR3 on AMD-V).
 	pub nested_paging_pointer: u64,
+	/// Host-physical address of the VM's APIC-access page (for hardware APIC
+	/// virtualization).
+	pub apic_access_hpa: u64,
 	/// Initial instruction pointer (the guest entry point).
 	pub entry_point: u64,
 	/// Initial stack pointer.
@@ -117,6 +120,7 @@ impl VCpu for Cpu {
 		let backend: Box<dyn VcpuBackend> = Box::new(
 			VmxCpu::new(
 				config.nested_paging_pointer,
+				config.apic_access_hpa,
 				vcpu_id as u64,
 				config.entry_point,
 				config.stack_pointer,

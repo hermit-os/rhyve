@@ -808,18 +808,24 @@ impl Vmcs {
 		// instructions cause a VM-exit so the guest's port I/O can be emulated.
 		let procbased = adjust_control(
 			VmxControl::ProcessorBased,
-			(PrimaryControls::SECONDARY_CONTROLS | PrimaryControls::UNCOND_IO_EXITING).bits()
-				as u64,
+			(PrimaryControls::SECONDARY_CONTROLS
+				| PrimaryControls::UNCOND_IO_EXITING
+				| PrimaryControls::USE_TPR_SHADOW)
+				.bits() as u64,
 		);
 		// Besides EPT, enable the instructions the guest expects to be usable
 		// because CPUID advertises them: without their secondary-control enable
-		// bit, RDTSCP/INVPCID/XSAVES raise #UD in the guest.
+		// bit, RDTSCP/INVPCID/XSAVES raise #UD in the guest. Hardware APIC
+		// virtualization (virtualize APIC accesses + APIC-register virtualization)
+		// lets the processor service the guest's local-APIC register accesses.
 		let secondary = adjust_control(
 			VmxControl::ProcessorBased2,
 			(SecondaryControls::ENABLE_EPT
 				| SecondaryControls::ENABLE_RDTSCP
 				| SecondaryControls::ENABLE_INVPCID
-				| SecondaryControls::ENABLE_XSAVES_XRSTORS)
+				| SecondaryControls::ENABLE_XSAVES_XRSTORS
+				| SecondaryControls::VIRTUALIZE_APIC
+				| SecondaryControls::VIRTUALIZE_APIC_REGISTER)
 				.bits() as u64,
 		);
 		// The guest runs in long mode; the host resumes in long mode. The
@@ -861,6 +867,26 @@ impl Vmcs {
 			vmwrite(control::PAGE_FAULT_ERR_CODE_MASK, 0)?;
 			vmwrite(control::PAGE_FAULT_ERR_CODE_MATCH, 0)?;
 			vmwrite(control::TPR_THRESHOLD, 0)?;
+		}
+
+		Ok(())
+	}
+
+	/// Configures the hardware APIC-virtualization pointers in the VMCS.
+	///
+	/// `virtual_apic_hpa` is the host-physical address of this vCPU's virtual-APIC
+	/// page (holding the virtualized local-APIC registers), `apic_access_hpa` the
+	/// host-physical address of the VM's APIC-access page (mapped at the guest's
+	/// local-APIC base in the EPT). Must be called when the "use TPR shadow" and
+	/// "virtualize APIC accesses" controls are enabled.
+	pub fn setup_apic(
+		&mut self,
+		virtual_apic_hpa: u64,
+		apic_access_hpa: u64,
+	) -> Result<(), HypervisorError> {
+		unsafe {
+			vmwrite(control::VIRT_APIC_ADDR_FULL, virtual_apic_hpa)?;
+			vmwrite(control::APIC_ACCESS_ADDR_FULL, apic_access_hpa)?;
 		}
 
 		Ok(())
