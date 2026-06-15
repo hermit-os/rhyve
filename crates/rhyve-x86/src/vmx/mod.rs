@@ -11,17 +11,17 @@ use core::mem::MaybeUninit;
 
 pub use ept::{Ept, NestedPaging, Page};
 use hermit::mm::{VirtAddr, virtual_to_physical};
+use rhyve_core::error::HypervisorError;
+use rhyve_core::{ExitReason, VcpuBackend};
 pub use run::GuestRegisters;
 pub use vmerror::VmxBasicExitReason;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
 
-use crate::error::HypervisorError;
 use crate::vmx::run::run_vmx_vm;
 use crate::vmx::vmcs::{Vmcs, guest, ro};
 use crate::vmx::vmxon::Vmxon;
-use crate::{ExitReason, VcpuBackend};
 
 /// Reporting Register of Basic VMX Capabilities (R/O) See Table 35-2. See Appendix A.1, Basic VMX Information (If CPUID.01H:ECX.\[bit 9\])
 const IA32_VMX_BASIC: u32 = 0x480;
@@ -255,7 +255,7 @@ impl VmxCpu {
 	}
 }
 
-impl VcpuBackend for VmxCpu {
+impl VcpuBackend<GuestRegisters> for VmxCpu {
 	/// Executes the vCPU until a VM-exit occurs.
 	///
 	/// Loads this vCPU's VMCS, restores the guest registers and performs a

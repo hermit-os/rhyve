@@ -11,10 +11,14 @@ repository = "https://github.com/hermit-os/rhyve"
 description = "A resource-aware Hyervisor"
 
 [workspace]
-members = ["crates/rhyve-x86"]
+members = [
+    "crates/rhyve-x86",
+    "crates/rhyve-core"
+]
 
 [dependencies]
 rhyve-x86 = { path = "crates/rhyve-x86" }
+rhyve-core = { path = "crates/rhyve-core" }
 hermit-kernel = { git = "https://github.com/hermit-os/kernel.git", branch = "main", default-features = false  }
 log = { version = "0.4", default-features = false }
 x86_64 = "0.15"

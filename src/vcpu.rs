@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 
 use hermit::print;
 use hermit_sync::SpinMutex;
-use rhyve_x86::*;
+use rhyve_core::*;
 
 use crate::HypervisorError;
 use crate::uart::Uart;
@@ -47,7 +47,7 @@ pub struct Cpu {
 	/// Emulated serial port (16550 UART).
 	uart: Arc<SpinMutex<Uart>>,
 	/// The virtualization backend driving this vCPU.
-	backend: Box<dyn VcpuBackend>,
+	backend: Box<dyn VcpuBackend<GuestRegisters>>,
 }
 
 pub trait VCpu: Sized {
@@ -90,7 +90,7 @@ impl VCpu for Cpu {
 	) -> Self {
 		// Backend-selection point: today only Intel VT-x is supported. A future
 		// implementation can pick the backend here based on the CPU vendor.
-		let backend: Box<dyn VcpuBackend> = Box::new(
+		let backend: Box<dyn VcpuBackend<GuestRegisters>> = Box::new(
 			VmxCpu::new(
 				config.nested_paging_pointer,
 				config.apic_access_hpa,

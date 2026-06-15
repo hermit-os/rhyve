@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use hermit_sync::SpinMutex;
-use rhyve_x86::error::*;
+use rhyve_core::error::*;
 
 use crate::uart::Uart;
 use crate::vcpu::{Cpu, CpuConfig, VCpu};

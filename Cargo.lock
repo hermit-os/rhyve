@@ -1205,10 +1205,18 @@ dependencies = [
  "hermit-kernel",
  "hermit-sync",
  "log",
+ "rhyve-core",
  "rhyve-x86",
  "time",
  "vm-fdt",
  "x86_64",
+]
+
+[[package]]
+name = "rhyve-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror-no-std",
 ]
 
 [[package]]
@@ -1225,7 +1233,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "raw-cpuid",
- "thiserror-no-std",
+ "rhyve-core",
  "x86_64",
 ]
 

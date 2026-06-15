@@ -20,8 +20,7 @@ use alloc::vec::Vec;
 
 use hermit::arch::{BasePageSize, PageSize};
 use hermit::mm::{VirtAddr, virtual_to_physical};
-
-use crate::error::HypervisorError;
+use rhyve_core::error::HypervisorError;
 
 /// Number of entries in a paging-structure table.
 const ENTRY_COUNT: usize = 512;

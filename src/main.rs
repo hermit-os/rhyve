@@ -28,7 +28,7 @@ use hermit::syscalls::{sys_alloc, sys_get_processor_frequency};
 use hermit::time::SystemTime;
 use hermit_entry::boot_info::*;
 use hermit_entry::elf::{KernelObject, LoadedKernel};
-use rhyve_x86::error::HypervisorError;
+use rhyve_core::error::HypervisorError;
 use rhyve_x86::*;
 use time::OffsetDateTime;
 use x86_64::instructions::interrupts;
@@ -69,12 +69,13 @@ fn load_guest_image(
 	image: &str,
 	guest_slice: &mut [MaybeUninit<u8>],
 ) -> Result<LoadedKernel, HypervisorError> {
-	let meta = fs::metadata(image).map_err(HypervisorError::IoError)?;
+	let meta = fs::metadata(image).map_err(|_| HypervisorError::IoError)?;
 	let len = meta.len();
-	let mut file = File::open(image).map_err(HypervisorError::IoError)?;
+	let mut file = File::open(image).map_err(|_| HypervisorError::IoError)?;
 
 	let mut buffer = vec![0; len];
-	file.read(&mut buffer).map_err(HypervisorError::IoError)?;
+	file.read(&mut buffer)
+		.map_err(|_| HypervisorError::IoError)?;
 
 	let elf_kernel = KernelObject::parse(&buffer).map_err(|_| HypervisorError::ParseError)?;
 	let kernel_offset = 128 * BasePageSize::SIZE;
