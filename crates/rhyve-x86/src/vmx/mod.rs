@@ -9,7 +9,7 @@ use core::arch::asm;
 use core::arch::x86_64::__cpuid_count;
 use core::mem::MaybeUninit;
 
-pub use ept::{Ept, Page};
+pub use ept::{Ept, NestedPaging, Page};
 use hermit::mm::{VirtAddr, virtual_to_physical};
 pub use run::GuestRegisters;
 pub use vmerror::VmxBasicExitReason;
@@ -18,21 +18,21 @@ use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
 
 use crate::error::HypervisorError;
-use crate::vcpu::{ExitReason, VcpuBackend};
 use crate::vmx::run::run_vmx_vm;
 use crate::vmx::vmcs::{Vmcs, guest, ro};
 use crate::vmx::vmxon::Vmxon;
+use crate::{ExitReason, VcpuBackend};
 
 /// Reporting Register of Basic VMX Capabilities (R/O) See Table 35-2. See Appendix A.1, Basic VMX Information (If CPUID.01H:ECX.\[bit 9\])
 const IA32_VMX_BASIC: u32 = 0x480;
 /// Capability Reporting Register of CR0 Bits Fixed to 0 (R/O) See Appendix A.7, VMX-Fixed Bits in CR0 (If CPUID.01H:ECX.\[bit 9\])
-const IA32_VMX_CR0_FIXED0: u32 = 0x486;
+pub const IA32_VMX_CR0_FIXED0: u32 = 0x486;
 /// Capability Reporting Register of CR0 Bits Fixed to 1 (R/O) See Appendix A.7, VMX-Fixed Bits in CR0 (If CPUID.01H:ECX.\[bit 9\])
-const IA32_VMX_CR0_FIXED1: u32 = 0x487;
+pub const IA32_VMX_CR0_FIXED1: u32 = 0x487;
 /// Capability Reporting Register of CR4 Bits Fixed to 0 (R/O) See Appendix A.8, VMX-Fixed Bits in CR4 (If CPUID.01H:ECX.\[bit 9\])
-const IA32_VMX_CR4_FIXED0: u32 = 0x488;
+pub const IA32_VMX_CR4_FIXED0: u32 = 0x488;
 /// Capability Reporting Register of CR4 Bits Fixed to 1 (R/O) See Appendix A.8, VMX-Fixed Bits in CR4 (If CPUID.01H:ECX.\[bit 9\])
-const IA32_VMX_CR4_FIXED1: u32 = 0x489;
+pub const IA32_VMX_CR4_FIXED1: u32 = 0x489;
 
 /* desired control word constrained by hardware/hypervisor capabilities */
 /*#[inline(always)]

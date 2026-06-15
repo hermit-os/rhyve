@@ -1,0 +1,24 @@
+[package]
+name = "rhyve-x86"
+version = "0.1.0"
+authors = ["Stefan Lankes <slankes@eonerc.rwth-aachen.de>"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+keywords = ["hypervisor", "virtualization"]
+categories = ["no_std", "virtualization"]
+repository = "https://github.com/hermit-os/rhyve"
+description = "Hardware-virtualization backend (Intel VT-x) for the rhyve hypervisor"
+
+[dependencies]
+hermit-kernel = { git = "https://github.com/hermit-os/kernel.git", branch = "main", default-features = false }
+log = { version = "0.4", default-features = false }
+x86_64 = "0.15"
+raw-cpuid = "11.5.0"
+bitfield = "0.19.0"
+bit_field = "0.10.2"
+thiserror-no-std = "2.0.2"
+bitflags = "2"
+num = { version = "0.4", default-features = false }
+num-traits = { version = "0.2.19", default-features = false }
+num-derive = { version = "0.4.2", default-features = false }
+hermit-sync = "0.1"

@@ -3,11 +3,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use hermit_sync::SpinMutex;
+use rhyve_x86::error::*;
 
-use crate::error::HypervisorError;
 use crate::uart::Uart;
 use crate::vcpu::{Cpu, CpuConfig, VCpu};
-use crate::vmx::{Ept, Page};
+use crate::vmx::{Ept, NestedPaging, Page};
 
 pub type VmId = usize;
 
@@ -19,24 +19,6 @@ pub struct VmConfig {
 	pub guest_base: *mut u8,
 	/// Size of the guest memory buffer in bytes.
 	pub guest_size: usize,
-}
-
-/// Nested paging that maps a guest-physical address space onto host-physical
-/// memory, independent of the virtualization extension.
-///
-/// Implemented by the concrete structures of each backend ([`Ept`] for Intel
-/// VT-x; AMD-V nested page tables would implement it likewise). The trait is
-/// object-safe so a [`Vm`] can own a `Box<dyn NestedPaging>` and the paging
-/// scheme can be chosen alongside the vCPU backend.
-pub trait NestedPaging {
-	/// Returns the nested-paging pointer addressing this guest-physical address
-	/// space (the EPT pointer on Intel VT-x, the nested CR3 on AMD-V), ready to
-	/// be stored in a vCPU's control structure.
-	fn pointer(&self) -> Result<u64, HypervisorError>;
-
-	/// Maps a single 4 KiB guest-physical page to a host-physical page, e.g. to
-	/// back an MMIO region such as the APIC pages.
-	fn map_mmio(&mut self, gpa: u64, hpa: u64) -> Result<(), HypervisorError>;
 }
 
 /// Guest-physical base of the local APIC MMIO (default `IA32_APIC_BASE`).
@@ -91,7 +73,7 @@ impl VirtualMachine for Vm {
 		// future implementation can pick the paging scheme here based on the CPU
 		// vendor, matching the vCPU backend chosen in `Cpu::new`.
 		let mut paging: Box<dyn NestedPaging> =
-			Box::new(Ept::new(config.guest_base, config.guest_size)?);
+			Box::new(unsafe { Ept::new(config.guest_base, config.guest_size)? });
 
 		// Back the APIC MMIO regions: the local APIC via a dedicated APIC-access
 		// page (used by hardware APIC virtualization), the I/O APIC via a plain

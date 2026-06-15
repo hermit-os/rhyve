@@ -22,7 +22,6 @@ use hermit::arch::{BasePageSize, PageSize};
 use hermit::mm::{VirtAddr, virtual_to_physical};
 
 use crate::error::HypervisorError;
-use crate::vm::NestedPaging;
 
 /// Number of entries in a paging-structure table.
 const ENTRY_COUNT: usize = 512;
@@ -40,6 +39,24 @@ const EPT_MEMORY_TYPE_WB: u64 = 6 << 3;
 const EPT_WALK_LENGTH_4: u64 = 3 << 3;
 /// EPTP: write-back paging-structure memory type.
 const EPT_POINTER_MEMORY_TYPE_WB: u64 = 6;
+
+/// Nested paging that maps a guest-physical address space onto host-physical
+/// memory, independent of the virtualization extension.
+///
+/// Implemented by the concrete structures of each backend ([`Ept`] for Intel
+/// VT-x; AMD-V nested page tables would implement it likewise). The trait is
+/// object-safe so a [`Vm`] can own a `Box<dyn NestedPaging>` and the paging
+/// scheme can be chosen alongside the vCPU backend.
+pub trait NestedPaging {
+	/// Returns the nested-paging pointer addressing this guest-physical address
+	/// space (the EPT pointer on Intel VT-x, the nested CR3 on AMD-V), ready to
+	/// be stored in a vCPU's control structure.
+	fn pointer(&self) -> Result<u64, HypervisorError>;
+
+	/// Maps a single 4 KiB guest-physical page to a host-physical page, e.g. to
+	/// back an MMIO region such as the APIC pages.
+	fn map_mmio(&mut self, gpa: u64, hpa: u64) -> Result<(), HypervisorError>;
+}
 
 /// A 4 KiB-aligned paging-structure table of 512 64-bit entries.
 #[repr(C, align(4096))]
@@ -115,12 +132,14 @@ pub struct Ept {
 }
 
 impl Ept {
+	/// # Safety
+	///
 	/// Builds EPT mapping guest-physical `[0, size)` onto the host-physical
 	/// pages that back `guest_base .. guest_base + size`.
 	///
 	/// `guest_base` must be page-aligned and `size` a multiple of the base page
 	/// size. The whole range has to fit into a single page-directory (1 GiB).
-	pub fn new(guest_base: *const u8, size: usize) -> Result<Self, HypervisorError> {
+	pub unsafe fn new(guest_base: *const u8, size: usize) -> Result<Self, HypervisorError> {
 		let page_size = BasePageSize::SIZE as usize;
 		assert_eq!(
 			guest_base as usize % page_size,
