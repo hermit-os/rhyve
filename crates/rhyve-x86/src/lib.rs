@@ -17,6 +17,7 @@ use core::mem::MaybeUninit;
 
 use raw_cpuid::CpuId;
 use rhyve_core::error::HypervisorError;
+use x86_64::{PhysAddr, VirtAddr};
 
 #[allow(dead_code)]
 const EFER_SCE: u64 = 1; /* System Call Extensions */
@@ -51,6 +52,13 @@ pub const BOOT_STACK_TOP: u64 = 0x70000;
 pub const PG_PRESENT: u64 = 1 << 0;
 pub const PG_RW: u64 = 1 << 1;
 pub const PG_HUGE: u64 = 1 << 7;
+
+unsafe extern "Rust" {
+	/// Converts a host-virtual address to a host-physical address.
+	/// Must be provided by the crate user
+	#[link_name = "__rhyve_x86_virtual_to_physical"]
+	pub safe fn virtual_to_physical(vaddr: VirtAddr) -> Option<PhysAddr>;
+}
 
 /// HypervisorExtension indicates the support of hardware
 /// extension to accelerate a virtual machine.

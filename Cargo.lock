@@ -1226,7 +1226,6 @@ dependencies = [
  "bit_field",
  "bitfield",
  "bitflags 2.13.0",
- "hermit-kernel",
  "hermit-sync",
  "log",
  "num",

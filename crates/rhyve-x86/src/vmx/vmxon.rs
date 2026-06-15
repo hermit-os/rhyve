@@ -1,6 +1,6 @@
 use bitfield::BitMut;
-use hermit::arch::{BasePageSize, PageSize};
 use x86_64::registers::model_specific::Msr;
+use x86_64::structures::paging::page::{PageSize, Size4KiB as BasePageSize};
 
 use crate::vmx::IA32_VMX_BASIC;
 

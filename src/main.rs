@@ -22,6 +22,7 @@ use embedded_io::Read;
 use hermit::arch::{BasePageSize, PageSize};
 use hermit::fd::AccessPermission;
 use hermit::fs::{self, File, create_dir, create_file};
+use hermit::mm::{PhysAddr, VirtAddr};
 use hermit::scheduler::task::NORMAL_PRIO;
 use hermit::scheduler::{join, shutdown, spawn};
 use hermit::syscalls::{sys_alloc, sys_get_processor_frequency};
@@ -43,6 +44,11 @@ static GUEST: &[u8] = include_bytes!("../data/x86_64/hello_world");
 pub const SERIAL_BASE: u16 = 0x800;
 /// Guest-physical address of the flattened device tree.
 pub const FDT_OFFSET: u64 = 0x5000;
+
+#[unsafe(export_name = "__rhyve_x86_virtual_to_physical")]
+fn provide_virtual_to_physical(vaddr: VirtAddr) -> Option<PhysAddr> {
+	hermit::mm::virtual_to_physical(vaddr)
+}
 
 fn mount_guest_image() {
 	create_dir("/image", AccessPermission::from_bits(0o777).unwrap())

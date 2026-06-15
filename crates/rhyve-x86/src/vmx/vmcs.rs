@@ -4,7 +4,6 @@ use core::arch::asm;
 use core::fmt;
 
 use bitfield::BitMut;
-use hermit::arch::{BasePageSize, PageSize};
 use rhyve_core::error::HypervisorError;
 use x86_64::PrivilegeLevel;
 use x86_64::instructions::segmentation::{CS, DS, ES, FS, GS, SS, Segment};
@@ -13,6 +12,7 @@ use x86_64::registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
 use x86_64::structures::gdt::SegmentSelector;
+use x86_64::structures::paging::page::{PageSize, Size4KiB as BasePageSize};
 
 use crate::vmx::IA32_VMX_BASIC;
 use crate::vmx::run::GuestRegisters;

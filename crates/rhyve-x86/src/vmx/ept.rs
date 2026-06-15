@@ -18,9 +18,11 @@ use alloc::alloc::{Layout, alloc_zeroed};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use hermit::arch::{BasePageSize, PageSize};
-use hermit::mm::{VirtAddr, virtual_to_physical};
 use rhyve_core::error::HypervisorError;
+use x86_64::addr::VirtAddr;
+use x86_64::structures::paging::page::{PageSize, Size4KiB as BasePageSize};
+
+use crate::virtual_to_physical;
 
 /// Number of entries in a paging-structure table.
 const ENTRY_COUNT: usize = 512;

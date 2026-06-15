@@ -10,15 +10,16 @@ use core::arch::x86_64::__cpuid_count;
 use core::mem::MaybeUninit;
 
 pub use ept::{Ept, NestedPaging, Page};
-use hermit::mm::{VirtAddr, virtual_to_physical};
 use rhyve_core::error::HypervisorError;
 use rhyve_core::{ExitReason, VcpuBackend};
 pub use run::GuestRegisters;
 pub use vmerror::VmxBasicExitReason;
+use x86_64::addr::VirtAddr;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
 
+use crate::virtual_to_physical;
 use crate::vmx::run::run_vmx_vm;
 use crate::vmx::vmcs::{Vmcs, guest, ro};
 use crate::vmx::vmxon::Vmxon;
