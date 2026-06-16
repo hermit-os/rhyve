@@ -47,15 +47,15 @@ const BOOT_PDPTE: u64 = BOOT_PML4 + 0x1000;
 const BOOT_PDE: u64 = BOOT_PML4 + 0x2000;
 
 /// Page-table/GDT entry flags.
-pub const PG_PRESENT: u64 = 1 << 0;
-pub const PG_RW: u64 = 1 << 1;
-pub const PG_HUGE: u64 = 1 << 7;
+const PG_PRESENT: u64 = 1 << 0;
+const PG_RW: u64 = 1 << 1;
+const PG_HUGE: u64 = 1 << 7;
 
-unsafe extern "Rust" {
-	/// Converts a host-virtual address to a host-physical address.
-	/// Must be provided by the crate user
-	#[link_name = "__rhyve_x86_virtual_to_physical"]
-	pub safe fn virtual_to_physical(vaddr: VirtAddr) -> Option<PhysAddr>;
+/// Converts a host-virtual address to a host-physical address via the
+/// [`HostMemory`](rhyve_core::HostMemory) implementation the crate user
+/// registered with [`rhyve_core::set_host_memory`].
+pub(crate) fn virtual_to_physical(vaddr: VirtAddr) -> Option<PhysAddr> {
+	rhyve_core::virtual_to_physical(vaddr.as_u64()).map(PhysAddr::new)
 }
 
 /// HypervisorExtension indicates the support of hardware

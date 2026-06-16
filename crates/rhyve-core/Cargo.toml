@@ -11,3 +11,4 @@ description = "Hardware-virtualization backend (Intel VT-x) for the rhyve hyperv
 
 [dependencies]
 thiserror-no-std = "2.0.2"
+hermit-sync = "0.1"

@@ -29,7 +29,6 @@ use x86_64::instructions::interrupts;
 use x86_64::structures::paging::page::{
 	PageSize, Size2MiB as LargePageSize, Size4KiB as BasePageSize,
 };
-use x86_64::{PhysAddr, VirtAddr};
 
 use crate::fdt::Fdt;
 use crate::vcpu::VCpu;
@@ -49,14 +48,16 @@ unsafe extern "C" {
 	safe fn sys_virt_addr_to_phys_addr(virt_addr: usize) -> usize;
 }
 
-#[unsafe(export_name = "__rhyve_x86_virtual_to_physical")]
-fn provide_virtual_to_physical(vaddr: VirtAddr) -> Option<PhysAddr> {
-	Some(PhysAddr::new(
-		sys_virt_addr_to_phys_addr(vaddr.as_u64().try_into().unwrap())
-			.try_into()
-			.unwrap(),
-	))
+/// Host-memory services backed by the hermit kernel, handed to `rhyve-core`.
+struct HermitHostMemory;
+
+impl rhyve_core::HostMemory for HermitHostMemory {
+	fn virtual_to_physical(&self, vaddr: u64) -> Option<u64> {
+		Some(sys_virt_addr_to_phys_addr(vaddr as usize) as u64)
+	}
 }
+
+static HOST_MEMORY: HermitHostMemory = HermitHostMemory;
 
 fn mount_guest_image() {
 	create_dir("/image").expect("Unable to create directory /image");
@@ -173,6 +174,9 @@ pub fn main() {
 	} else {
 		panic!("CPU doesn't support any virtualization extensions!")
 	}
+
+	// Provide the host's virtual-to-physical translation to the backend.
+	rhyve_core::set_host_memory(&HOST_MEMORY);
 
 	// mount guest image
 	mount_guest_image();
