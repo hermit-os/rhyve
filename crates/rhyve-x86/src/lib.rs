@@ -45,8 +45,6 @@ const BOOT_GDT_MAX: usize = 3;
 const BOOT_PDPTE: u64 = BOOT_PML4 + 0x1000;
 /// Guest-physical address of the boot page directory.
 const BOOT_PDE: u64 = BOOT_PML4 + 0x2000;
-/// Initial guest stack pointer (grows down, below the loaded kernel).
-pub const BOOT_STACK_TOP: u64 = 0x70000;
 
 /// Page-table/GDT entry flags.
 pub const PG_PRESENT: u64 = 1 << 0;

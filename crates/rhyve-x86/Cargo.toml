@@ -13,7 +13,7 @@ description = "Hardware-virtualization backend (Intel VT-x) for the rhyve hyperv
 rhyve-core = { path = "../rhyve-core" }
 log = { version = "0.4", default-features = false }
 x86_64 = "0.15"
-raw-cpuid = "11.5.0"
+raw-cpuid = "11.6.0"
 bitfield = "0.19.0"
 bit_field = "0.10.2"
 bitflags = "2"

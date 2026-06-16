@@ -1,38 +1,35 @@
-#![no_std] // don't link the Rust standard library
-#![no_main]
+#![feature(allocator_api)]
+#![feature(ptr_as_uninit)]
 
 #[macro_use]
 extern crate log;
 extern crate alloc;
-extern crate hermit;
+
+use hermit as _;
 
 mod fdt;
 mod uart;
 mod vcpu;
 mod vm;
 
-use alloc::borrow::ToOwned;
-use alloc::vec;
-use core::ffi::CStr;
-use core::mem::MaybeUninit;
-use core::num::NonZero;
-use core::ptr::slice_from_raw_parts_mut;
+use std::alloc::*;
+use std::ffi::CStr;
+use std::fs::{self, File, create_dir};
+use std::io::{Read, Write};
+use std::mem::MaybeUninit;
+use std::num::NonZero;
+use std::time::SystemTime;
 
-use embedded_io::Read;
-use hermit::arch::{BasePageSize, PageSize};
-use hermit::fd::AccessPermission;
-use hermit::fs::{self, File, create_dir, create_file};
-use hermit::mm::{PhysAddr, VirtAddr};
-use hermit::scheduler::task::NORMAL_PRIO;
-use hermit::scheduler::{join, shutdown, spawn};
-use hermit::syscalls::{sys_alloc, sys_get_processor_frequency};
-use hermit::time::SystemTime;
 use hermit_entry::boot_info::*;
 use hermit_entry::elf::{KernelObject, LoadedKernel};
 use rhyve_core::error::HypervisorError;
 use rhyve_x86::*;
 use time::OffsetDateTime;
 use x86_64::instructions::interrupts;
+use x86_64::structures::paging::page::{
+	PageSize, Size2MiB as LargePageSize, Size4KiB as BasePageSize,
+};
+use x86_64::{PhysAddr, VirtAddr};
 
 use crate::fdt::Fdt;
 use crate::vcpu::VCpu;
@@ -41,34 +38,31 @@ use crate::vm::{VirtualMachine, Vm, VmConfig};
 static GUEST: &[u8] = include_bytes!("../data/x86_64/hello_world");
 
 // I/O port base of the guest's emulated serial port.
-pub const SERIAL_BASE: u16 = 0x800;
+const SERIAL_BASE: u16 = 0x800;
 /// Guest-physical address of the flattened device tree.
-pub const FDT_OFFSET: u64 = 0x5000;
+const FDT_OFFSET: u64 = 0x5000;
+/// Initial guest stack pointer (grows down, below the loaded kernel).
+const BOOT_STACK_TOP: u64 = 0x70000;
+
+unsafe extern "C" {
+	safe fn sys_get_processor_frequency() -> u16;
+	safe fn sys_virt_addr_to_phys_addr(virt_addr: usize) -> usize;
+}
 
 #[unsafe(export_name = "__rhyve_x86_virtual_to_physical")]
 fn provide_virtual_to_physical(vaddr: VirtAddr) -> Option<PhysAddr> {
-	hermit::mm::virtual_to_physical(vaddr)
+	Some(PhysAddr::new(
+		sys_virt_addr_to_phys_addr(vaddr.as_u64().try_into().unwrap())
+			.try_into()
+			.unwrap(),
+	))
 }
 
 fn mount_guest_image() {
-	create_dir("/image", AccessPermission::from_bits(0o777).unwrap())
-		.expect("Unable to create directory /image");
+	create_dir("/image").expect("Unable to create directory /image");
 
-	// Mount in-memory file
-	if create_file(
-		"/image/guest",
-		GUEST,
-		AccessPermission::S_IRUSR
-			| AccessPermission::S_IRGRP
-			| AccessPermission::S_IROTH
-			| AccessPermission::S_IXUSR
-			| AccessPermission::S_IXGRP
-			| AccessPermission::S_IXOTH,
-	)
-	.is_err()
-	{
-		error!("Unable to mount file");
-	}
+	let mut file = File::create("/image/guest").expect("Unable to create_file");
+	file.write_all(GUEST).expect("Unable to write to file");
 }
 
 fn load_guest_image(
@@ -79,7 +73,7 @@ fn load_guest_image(
 	let len = meta.len();
 	let mut file = File::open(image).map_err(|_| HypervisorError::IoError)?;
 
-	let mut buffer = vec![0; len];
+	let mut buffer = vec![0; len.try_into().unwrap()];
 	file.read(&mut buffer)
 		.map_err(|_| HypervisorError::IoError)?;
 
@@ -99,10 +93,10 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 	info!("Using image {image:?}");
 
 	// Create slice for the guest
-	let guest_size = 256 << 20; // create image with a memory size of 256 MiB
-	let guest_ptr = sys_alloc(guest_size, BasePageSize::SIZE as usize) as *mut MaybeUninit<u8>;
-	let guest_slice: &mut [MaybeUninit<u8>] =
-		unsafe { &mut *slice_from_raw_parts_mut(guest_ptr, guest_size) };
+	let guest_size = 256 << 20; // create VM with a memory size of 256 MiB
+	let layout =
+		unsafe { Layout::from_size_align_unchecked(guest_size, LargePageSize::SIZE as usize) };
+	let guest_slice = unsafe { Global.allocate(layout).unwrap().as_uninit_slice_mut() };
 
 	// load guest
 	let loaded_kernel = load_guest_image(image, guest_slice)?;
@@ -110,7 +104,9 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 	debug!("LoadInfo {:x?}", loaded_kernel.load_info);
 
 	let load_info = loaded_kernel.load_info;
-	let duration = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
+	let duration = SystemTime::now()
+		.duration_since(SystemTime::UNIX_EPOCH)
+		.expect("Unable to create time sinde UNIX_EPOCH");
 	let cpu_freq: u32 = sys_get_processor_frequency().into();
 	let boot_info = BootInfo {
 		hardware_info: HardwareInfo {
@@ -156,7 +152,7 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 	let mut vm = Vm::new(
 		0,
 		VmConfig {
-			guest_base: guest_ptr.cast::<u8>(),
+			guest_base: guest_slice.as_mut_ptr() as *mut u8,
 			guest_size,
 		},
 	)?;
@@ -167,14 +163,7 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 	Ok(())
 }
 
-extern "C" fn start_hypervisor(path: usize) {
-	let image = unsafe { CStr::from_ptr(core::ptr::with_exposed_provenance(path)) };
-	let _ = init_hypervisor(image)
-		.map_err(|e| error!("Unable to start hypervisor with image {image:?}: {e:?}"));
-}
-
-#[unsafe(no_mangle)] // don't mangle the name of this function
-pub extern "C" fn runtime_entry(_argc: i32, _argv: *const *const u8, _env: *const *const u8) -> ! {
+pub fn main() {
 	info!("Initialize rhyve");
 
 	if let Ok(result) = check_supported_cpu() {
@@ -188,19 +177,7 @@ pub extern "C" fn runtime_entry(_argc: i32, _argv: *const *const u8, _env: *cons
 	// mount guest image
 	mount_guest_image();
 
-	debug!("Spawn thread to start the hypervisor");
+	debug!("Start the hypervisor");
 
-	let image = c"/image/guest".to_owned();
-	let id = unsafe {
-		spawn(
-			start_hypervisor,
-			image.into_raw() as usize,
-			NORMAL_PRIO,
-			hermit::DEFAULT_STACK_SIZE,
-			-1,
-		)
-	};
-	let _ = join(id);
-
-	shutdown(0);
+	init_hypervisor(c"/image/guest").unwrap();
 }

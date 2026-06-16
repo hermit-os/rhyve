@@ -1,7 +1,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use hermit::print;
 use hermit_sync::SpinMutex;
 use rhyve_core::*;
 
