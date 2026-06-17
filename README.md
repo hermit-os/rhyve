@@ -9,6 +9,7 @@ The current stage is just a proof of concept is derived from following tutorials
 1. memN0ps ' turtorial [Hypervisor Development in Rust](https://memn0ps.github.io/hypervisor-development-in-rust-part-1/)
 2. The Type-1 hypervisor [illusion-rs](https://github.com/memN0ps/illusion-rs)
 3. The sample hypervisor [Hello-VT-rp](https://github.com/tandasat/Hello-VT-rp)
+4. [memhv](https://github.com/SamuelTulach/memhv) Minimalistic hypervisor with memory introspection capabilities
 
 ## Licensing
 
