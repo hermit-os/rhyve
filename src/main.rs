@@ -98,6 +98,9 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 	let layout =
 		unsafe { Layout::from_size_align_unchecked(guest_size, LargePageSize::SIZE as usize) };
 	let guest_slice = unsafe { Global.allocate(layout).unwrap().as_uninit_slice_mut() };
+	// `Global.allocate` returns uninitialized memory; the guest expects its RAM
+	// (BSS, gaps, stack) to read as zero, so clear the whole buffer before loading.
+	guest_slice.fill(MaybeUninit::new(0));
 
 	// load guest
 	let loaded_kernel = load_guest_image(image, guest_slice)?;
@@ -167,12 +170,10 @@ fn init_hypervisor(image: &CStr) -> Result<(), HypervisorError> {
 pub fn main() {
 	info!("Initialize rhyve");
 
-	if let Ok(result) = check_supported_cpu() {
-		if result == HypervisorExtension::Svm {
-			panic!("AMD-V is currently not supportedt");
-		}
-	} else {
-		panic!("CPU doesn't support any virtualization extensions!")
+	match check_supported_cpu() {
+		Ok(HypervisorExtension::Vmx) => info!("Using the Intel VT-x (VMX) backend"),
+		Ok(HypervisorExtension::Svm) => info!("Using the AMD-V (SVM) backend"),
+		Err(_) => panic!("CPU doesn't support any virtualization extensions!"),
 	}
 
 	// Provide the host's virtual-to-physical translation to the backend.

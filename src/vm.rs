@@ -5,9 +5,11 @@ use alloc::vec::Vec;
 use hermit_sync::SpinMutex;
 use rhyve_core::error::*;
 
+use crate::svm::Npt;
 use crate::uart::Uart;
 use crate::vcpu::{Cpu, CpuConfig, VCpu};
 use crate::vmx::{Ept, NestedPaging, Page};
+use crate::{HypervisorExtension, check_supported_cpu};
 
 pub type VmId = usize;
 
@@ -69,11 +71,15 @@ impl VirtualMachine for Vm {
 	/// guest-physical address space. No vCPU exists yet; add them with
 	/// [`Vm::create_cpu`].
 	fn new(id: VmId, config: Self::Config) -> Result<Self, HypervisorError> {
-		// Backend-selection point: today only Intel VT-x EPT is supported. A
-		// future implementation can pick the paging scheme here based on the CPU
-		// vendor, matching the vCPU backend chosen in `Cpu::new`.
+		// Backend-selection point: pick the nested-paging scheme matching the host
+		// CPU's virtualization extension (AMD-V NPT or Intel VT-x EPT). This must
+		// agree with the vCPU backend chosen in `Cpu::new`.
 		let mut paging: Box<dyn NestedPaging> =
-			Box::new(unsafe { Ept::new(config.guest_base, config.guest_size)? });
+			if matches!(check_supported_cpu(), Ok(HypervisorExtension::Svm)) {
+				Box::new(unsafe { Npt::new(config.guest_base, config.guest_size)? })
+			} else {
+				Box::new(unsafe { Ept::new(config.guest_base, config.guest_size)? })
+			};
 
 		// Back the APIC MMIO regions: the local APIC via a dedicated APIC-access
 		// page (used by hardware APIC virtualization), the I/O APIC via a plain

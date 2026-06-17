@@ -1,9 +1,8 @@
 //! Hardware-virtualization backend for the rhyve hypervisor.
 //!
 //! This library contains the architecture-specific part of the hypervisor: the
-//! Intel VT-x (VMX) backend together with the backend-agnostic abstractions it
-//! implements ([`Vm`], [`Cpu`] and their traits). The `rhyve` binary drives it,
-//! providing the guest image, boot information and the hermit runtime glue.
+//! Intel VT-x (VMX) and AMD-V (SVM) backend together with the backend-agnostic
+//! abstractions it implements ([`Vm`], [`Cpu`] and their traits).
 
 #![no_std]
 
@@ -11,6 +10,7 @@
 extern crate log;
 extern crate alloc;
 
+pub mod svm;
 pub mod vmx;
 
 use core::mem::MaybeUninit;

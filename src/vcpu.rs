@@ -4,10 +4,11 @@ use alloc::sync::Arc;
 use hermit_sync::SpinMutex;
 use rhyve_core::*;
 
-use crate::HypervisorError;
+use crate::svm::SvmCpu;
 use crate::uart::Uart;
 use crate::vm::VmId;
 use crate::vmx::{GuestRegisters, VmxCpu};
+use crate::{HypervisorError, HypervisorExtension, check_supported_cpu};
 
 pub type VCpuId = usize;
 
@@ -87,18 +88,33 @@ impl VCpu for Cpu {
 		uart: Arc<SpinMutex<Uart>>,
 		config: Self::VCpuConfig,
 	) -> Self {
-		// Backend-selection point: today only Intel VT-x is supported. A future
-		// implementation can pick the backend here based on the CPU vendor.
-		let backend: Box<dyn VcpuBackend<GuestRegisters>> = Box::new(
-			VmxCpu::new(
-				config.nested_paging_pointer,
-				config.apic_access_hpa,
-				vcpu_id as u64,
-				config.entry_point,
-				config.stack_pointer,
-			)
-			.expect("Failed to create the VT-x backend of the vCPU"),
-		);
+		// Backend-selection point: pick the virtualization extension the host CPU
+		// supports. The paging scheme chosen in `Vm::new` must match (both query
+		// the same CPU, so they agree).
+		let backend: Box<dyn VcpuBackend<GuestRegisters>> =
+			if matches!(check_supported_cpu(), Ok(HypervisorExtension::Svm)) {
+				Box::new(
+					SvmCpu::new(
+						config.nested_paging_pointer,
+						config.apic_access_hpa,
+						vcpu_id as u64,
+						config.entry_point,
+						config.stack_pointer,
+					)
+					.expect("Failed to create the AMD-V backend of the vCPU"),
+				)
+			} else {
+				Box::new(
+					VmxCpu::new(
+						config.nested_paging_pointer,
+						config.apic_access_hpa,
+						vcpu_id as u64,
+						config.entry_point,
+						config.stack_pointer,
+					)
+					.expect("Failed to create the VT-x backend of the vCPU"),
+				)
+			};
 
 		Self {
 			vm_id,
