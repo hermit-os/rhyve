@@ -44,6 +44,10 @@ const N_CR3: usize = 0x0B0;
 pub const NRIP: usize = 0x0C8;
 
 // Intercept bits within `INTERCEPT_INSTR1`.
+/// Physical (external) interrupt: any host interrupt arriving while the guest
+/// runs causes a clean `#VMEXIT (VMEXIT_INTR)` instead of being injected into
+/// the guest, so the host keeps ownership of its own device interrupts.
+const INTERCEPT_INTR: u32 = 1 << 0;
 const INTERCEPT_CPUID: u32 = 1 << 18;
 const INTERCEPT_PAUSE: u32 = 1 << 23;
 const INTERCEPT_IOIO: u32 = 1 << 27;
@@ -160,10 +164,17 @@ impl Vmcb {
 	/// `iopm_pa`/`msrpm_pa` the host-physical addresses of the I/O- and
 	/// MSR-permission maps.
 	pub fn setup_control(&mut self, ncr3: u64, iopm_pa: u64, msrpm_pa: u64) {
-		// Intercept the instructions the backend emulates on the host's behalf.
+		// Intercept the instructions the backend emulates on the host's behalf,
+		// plus physical interrupts so the host stays responsive while the guest
+		// runs (see `INTERCEPT_INTR`).
 		self.write_u32(
 			INTERCEPT_INSTR1,
-			INTERCEPT_CPUID | INTERCEPT_PAUSE | INTERCEPT_IOIO | INTERCEPT_MSR | INTERCEPT_SHUTDOWN,
+			INTERCEPT_INTR
+				| INTERCEPT_CPUID
+				| INTERCEPT_PAUSE
+				| INTERCEPT_IOIO
+				| INTERCEPT_MSR
+				| INTERCEPT_SHUTDOWN,
 		);
 		// VMRUN *must* be intercepted, otherwise VMRUN itself faults.
 		self.write_u32(INTERCEPT_INSTR2, INTERCEPT_VMRUN | INTERCEPT_XSETBV);
@@ -184,8 +195,8 @@ impl Vmcb {
 	/// the VT-x backend's guest setup. Segment bases are flat, the boot GDT lives in
 	/// guest memory and `entry_point`/`rsp` become the initial RIP/RSP.
 	pub fn setup_guest(&mut self, entry_point: u64, rsp: u64) {
-		let code = (crate::GDT_KERNEL_CODE << 3) as u16;
-		let data = (crate::GDT_KERNEL_DATA << 3) as u16;
+		let code = crate::GDT_KERNEL_CODE << 3;
+		let data = crate::GDT_KERNEL_DATA << 3;
 
 		// Packed segment attributes (descriptor bits [55:52][47:40]):
 		// present 64-bit code (0xA9B), present 4 GiB data (0xC93) and a busy

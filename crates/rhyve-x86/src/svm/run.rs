@@ -88,15 +88,24 @@ run_svm_vm:
     mov     r15, [rdi + svm_r15]
     mov     rdi, [rdi + svm_rdi] // load rdi last; it is the base pointer above
 
+    // Mask interrupts globally (GIF = 0) for the entry window: while the guest's
+    // hidden segment state is loaded the host must not take an interrupt, and any
+    // physical interrupt arriving during the guest becomes a #VMEXIT(VMEXIT_INTR)
+    // thanks to INTERCEPT_INTR rather than being injected into the guest.
+    clgi
+
     // Load the guest's hidden segment state, run the guest, save it back.
     mov     rax, [rsp + 8]       // guest_vmcb_pa
     vmload  rax
     vmrun   rax
     vmsave  rax
 
-    // Restore the host's hidden segment state.
+    // Restore the host's hidden segment state, then unmask (GIF = 1): a physical
+    // interrupt that exited the guest is now delivered to the host's own ISR,
+    // with the host's FS/GS/TR/... back in place.
     mov     rax, [rsp]           // host_vmcb_pa
     vmload  rax
+    stgi
 
     // Recover the registers pointer (its guest RAX value lives in the VMCB, not
     // in a GPR here) and write the guest GPRs back.

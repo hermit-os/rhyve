@@ -289,6 +289,14 @@ impl VcpuBackend<GuestRegisters> for VmxCpu {
 			VmxBasicExitReason::from_u32(reason).ok_or(HypervisorError::UnknownVMExitReason)?;
 
 		match basic {
+			VmxBasicExitReason::ExternalInterrupt => {
+				// A host interrupt forced this exit. The CPU did not acknowledge it
+				// (no ack-on-exit), so it is still pending; open a one-instruction
+				// window for the host's own IDT handler to service it, then resume
+				// the guest at the same RIP (the interrupt was asynchronous).
+				unsafe { asm!("sti; nop; cli") };
+				Ok(ExitReason::Success)
+			}
 			VmxBasicExitReason::Rdmsr => {
 				// `rcx` holds the MSR index, which must be mapped to the matching
 				// VMCS guest-state field — it is not itself a VMCS field encoding.

@@ -9,6 +9,9 @@
 
 #![allow(dead_code)]
 
+/// Physical (external) interrupt arrived while the guest ran (`VMEXIT_INTR`).
+/// The host services it on the way out (after `stgi`); the guest is then resumed.
+pub const INTR: u64 = 0x60;
 /// CPUID instruction (`VMEXIT_CPUID`).
 pub const CPUID: u64 = 0x72;
 /// PAUSE instruction (`VMEXIT_PAUSE`).

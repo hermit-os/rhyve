@@ -66,7 +66,11 @@ impl Bitmap {
 			return Err(HypervisorError::AllocationFailed);
 		}
 		// SAFETY: `ptr` is freshly allocated and aligned for `Bitmap`.
-		unsafe { ptr.write(Bitmap { data: [0xFF; BasePageSize::SIZE as usize] }) };
+		unsafe {
+			ptr.write(Bitmap {
+				data: [0xFF; BasePageSize::SIZE as usize],
+			})
+		};
 		// SAFETY: `ptr` now points at an initialized `Bitmap`.
 		Ok(unsafe { Box::from_raw(ptr) })
 	}
@@ -155,8 +159,7 @@ impl SvmCpu {
 
 		let vmcb_pa = host_physical((vmcb.as_ref() as *const Vmcb).cast())?;
 		let host_vmcb_pa = host_physical((host_vmcb.as_ref() as *const Vmcb).cast())?;
-		let host_save_pa =
-			host_physical((host_save_area.as_ref() as *const HostSaveArea).cast())?;
+		let host_save_pa = host_physical((host_save_area.as_ref() as *const HostSaveArea).cast())?;
 
 		let mut cpu = Self {
 			vmcb,
@@ -246,6 +249,12 @@ impl VcpuBackend<GuestRegisters> for SvmCpu {
 		let exitcode = self.vmcb.read_u64(vmcb::EXITCODE);
 
 		match exitcode {
+			exitcode::INTR => {
+				// A physical interrupt exited the guest; the host already serviced
+				// it (the trampoline's `stgi` delivered it). Resume the guest at the
+				// same RIP — the interrupt was asynchronous, so nothing to advance.
+				Ok(ExitReason::Success)
+			}
 			exitcode::PAUSE => {
 				self.regs.rip += 2;
 				Ok(ExitReason::Success)
@@ -320,10 +329,7 @@ impl VcpuBackend<GuestRegisters> for SvmCpu {
 				Err(HypervisorError::VMEntryFailed(0))
 			}
 			_ => {
-				warn!(
-					"Unhandled exit code at {:x}: {exitcode:#x}",
-					self.regs.rip
-				);
+				warn!("Unhandled exit code at {:x}: {exitcode:#x}", self.regs.rip);
 				Err(HypervisorError::UnknownVMExitReason)
 			}
 		}

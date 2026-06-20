@@ -16,7 +16,9 @@ use x86_64::structures::paging::page::{PageSize, Size4KiB as BasePageSize};
 
 use crate::vmx::IA32_VMX_BASIC;
 use crate::vmx::run::GuestRegisters;
-use crate::vmx::vmcs::control::{EntryControls, ExitControls, PrimaryControls, SecondaryControls};
+use crate::vmx::vmcs::control::{
+	EntryControls, ExitControls, PinbasedControls, PrimaryControls, SecondaryControls,
+};
 
 /// IA32_FS_BASE model-specific register.
 pub(crate) const IA32_FS_BASE: u32 = 0xC000_0100;
@@ -802,8 +804,14 @@ impl Vmcs {
 	/// Every value is constrained by the VMX capability MSRs via
 	/// [`adjust_control`].
 	pub fn setup_controls(&mut self, eptp: u64) -> Result<(), HypervisorError> {
-		// No pin-based controls are required for a minimal guest.
-		let pinbased = adjust_control(VmxControl::PinBased, 0);
+		// Make external interrupts cause a VM-exit instead of being delivered to
+		// the guest, so a host device interrupt (timer, NIC, ...) arriving while
+		// the guest runs is handled by the host. The host stays responsive during
+		// the run and need not disable interrupts for its whole duration.
+		let pinbased = adjust_control(
+			VmxControl::PinBased,
+			PinbasedControls::EXTERNAL_INTERRUPT_EXITING.bits() as u64,
+		);
 		// Activate the secondary controls so EPT can be enabled, and make all I/O
 		// instructions cause a VM-exit so the guest's port I/O can be emulated.
 		let procbased = adjust_control(
