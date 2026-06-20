@@ -12,6 +12,12 @@ use crate::{HypervisorError, HypervisorExtension, check_supported_cpu};
 
 pub type VCpuId = usize;
 
+/// I/O ports the guest writes to request shutdown. `0xf4` is the `isa-debug-exit`
+/// port the hermit guest uses (it writes it right after "exit status 0");
+/// `0x540`/`0x1020` are the uhyve "exit" hypercall ports used by other guest
+/// configurations. A write to any of them ends the run cleanly.
+const EXIT_PORTS: [u16; 3] = [0xf4, 0x540, 0x1020];
+
 /// Initial configuration of a virtual CPU.
 ///
 /// Describes the architectural state a [`Cpu`] starts executing with. The
@@ -133,6 +139,12 @@ impl VCpu for Cpu {
 					let is_in = (q >> 3) & 1 != 0; // Bit 3: 0 = OUT, 1 = IN
 					let port = (q >> 16) as u16; // Bits 16–31: port number
 
+					// A write to an exit port is the guest requesting shutdown; end
+					// the run cleanly so the caller's output stream closes.
+					if !is_in && EXIT_PORTS.contains(&port) {
+						return Ok(());
+					}
+
 					// Only the guest's serial port (8 consecutive ports from the base)
 					// is emulated; other I/O is swallowed.
 					let serial = (crate::SERIAL_BASE..crate::SERIAL_BASE + 8).contains(&port);
@@ -146,8 +158,8 @@ impl VCpu for Cpu {
 							0
 						};
 						self.registers_mut().rax = (rax & !0xff) | u64::from(value);
-					} else if serial && let Some(byte) = self.uart.lock().write(offset, rax as u8) {
-						print!("{}", byte as char);
+					} else if serial {
+						let _ = self.uart.lock().write(offset, rax as u8);
 					}
 				}
 				ExitReason::Shutdown => {

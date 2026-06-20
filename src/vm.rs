@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use hermit_sync::SpinMutex;
 use rhyve_core::error::*;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::svm::Npt;
 use crate::uart::Uart;
@@ -107,6 +108,12 @@ impl Vm {
 	/// Returns the id of this virtual machine.
 	pub fn id(&self) -> VmId {
 		self.id
+	}
+
+	/// Attaches the channel the guest's serial output is streamed into. Call
+	/// before the first run.
+	pub fn set_output_sink(&self, sink: UnboundedSender<Vec<u8>>) {
+		self.uart.lock().set_sink(sink);
 	}
 
 	/// Adds a virtual CPU to this VM and returns a mutable reference to it.

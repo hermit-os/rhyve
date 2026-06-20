@@ -26,6 +26,10 @@ hermit-sync = "0.1"
 time = { version = "0.3", default-features = false }
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 hermit = { git = "https://github.com/hermit-os/hermit-rs.git", branch = "main", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt", "net", "macros", "sync"] }
+tokio-stream = { version = "0.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
 
 [features]
 default = ["pci", "pci-ids", "fsgsbase", "kernel-stack", "acpi", "dns", "dhcpv4", "tcp", "udp", "virtio-net", "virtio-fs", "virtio-vsock"]
@@ -42,3 +46,9 @@ virtio-net = ["hermit/virtio-net"]
 virtio-fs = ["hermit/virtio-fs"]
 virtio-vsock = ["hermit/virtio-vsock"]
 kernel-stack = ["hermit/kernel-stack"]
+
+# tokio/socket2 do not support the hermit target upstream; use the hermit-os
+# forks (as the hermit-rs axum example does) so async networking builds.
+[patch.crates-io]
+socket2 = { git = "https://github.com/hermit-os/socket2.git", branch = "v0.5.x" }
+tokio = { git = "https://github.com/hermit-os/tokio.git", branch = "v/tokio-1.45.0" }
