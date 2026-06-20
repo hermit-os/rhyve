@@ -178,8 +178,30 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <meta charset="utf-8">
   <title>rhyve — upload a guest image</title>
   <style>
-    body { font-family: sans-serif; max-width: 40rem; margin: 3rem auto; }
+    body { font-family: sans-serif; max-width: 50rem; margin: 3rem auto; }
     #result { white-space: pre-wrap; margin-top: 1rem; }
+    #output {
+      margin-top: 1rem;
+      height: 24rem;
+      overflow: auto;
+      white-space: pre;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85rem;
+      line-height: 1.3;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 0.75rem;
+      border: 1px solid #444;
+      border-radius: 4px;
+    }
+    #toolbar {
+      margin-top: 1rem;
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      font-size: 0.85rem;
+    }
+    #bytes { color: #888; margin-left: auto; }
   </style>
 </head>
 <body>
@@ -189,10 +211,25 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <button id="btn">Upload</button>
   <button id="run" disabled>Run guest</button>
   <div id="result"></div>
+  <div id="toolbar" hidden>
+    <button id="clear">Clear</button>
+    <label><input type="checkbox" id="wrap"> Wrap lines</label>
+    <span id="bytes">0 bytes</span>
+  </div>
+  <pre id="output" hidden></pre>
   <script>
     const result = document.getElementById('result');
+    const output = document.getElementById('output');
+    const toolbar = document.getElementById('toolbar');
+    const bytesEl = document.getElementById('bytes');
     const runBtn = document.getElementById('run');
     let lastName = null;
+    let bytes = 0;
+    const setBytes = (n) => { bytes = n; bytesEl.textContent = bytes.toLocaleString() + ' bytes'; };
+    document.getElementById('clear').onclick = () => { output.textContent = ''; setBytes(0); };
+    document.getElementById('wrap').onchange = (e) => {
+      output.style.whiteSpace = e.target.checked ? 'pre-wrap' : 'pre';
+    };
 
     document.getElementById('btn').onclick = async () => {
       const input = document.getElementById('file');
@@ -214,9 +251,27 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     runBtn.onclick = async () => {
       if (!lastName) return;
       result.textContent = `Running ${lastName}…`;
+      output.hidden = false;
+      toolbar.hidden = false;
+      output.textContent = '';
+      setBytes(0);
       try {
         const resp = await fetch('/run/' + encodeURIComponent(lastName), { method: 'POST' });
-        result.textContent = (resp.ok ? '' : 'Error: ') + await resp.text();
+        if (!resp.ok) { result.textContent = 'Error: ' + await resp.text(); return; }
+        result.textContent = '';
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // Keep the view pinned to the bottom, unless the user scrolled up.
+          const atBottom =
+            output.scrollHeight - output.scrollTop - output.clientHeight < 24;
+          output.textContent += decoder.decode(value, { stream: true });
+          setBytes(bytes + value.length);
+          if (atBottom) output.scrollTop = output.scrollHeight;
+        }
+        output.textContent += decoder.decode();
       } catch (e) {
         result.textContent = 'Error: ' + e;
       }
