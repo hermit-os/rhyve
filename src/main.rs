@@ -13,8 +13,6 @@ mod vcpu;
 mod vm;
 
 use std::alloc::*;
-use std::fs::{self, File, create_dir};
-use std::io::{Read, Write};
 use std::mem::MaybeUninit;
 use std::num::NonZero;
 use std::time::SystemTime;
@@ -24,6 +22,8 @@ use hermit_entry::elf::{KernelObject, LoadedKernel};
 use rhyve_core::error::HypervisorError;
 use rhyve_x86::*;
 use time::OffsetDateTime;
+use tokio::fs::{File, create_dir};
+use tokio::io::AsyncWriteExt;
 use x86_64::structures::paging::page::{
 	PageSize, Size2MiB as LargePageSize, Size4KiB as BasePageSize,
 };
@@ -59,13 +59,12 @@ fn load_guest_image(
 	image: &str,
 	guest_slice: &mut [MaybeUninit<u8>],
 ) -> Result<LoadedKernel, HypervisorError> {
-	let meta = fs::metadata(image).map_err(|_| HypervisorError::IoError)?;
+	let meta = std::fs::metadata(image).map_err(|_| HypervisorError::IoError)?;
 	let len = meta.len();
-	let mut file = File::open(image).map_err(|_| HypervisorError::IoError)?;
+	let mut file = std::fs::File::open(image).map_err(|_| HypervisorError::IoError)?;
 
 	let mut buffer = vec![0; len.try_into().unwrap()];
-	file.read(&mut buffer)
-		.map_err(|_| HypervisorError::IoError)?;
+	std::io::Read::read(&mut file, &mut buffer).map_err(|_| HypervisorError::IoError)?;
 
 	let elf_kernel = KernelObject::parse(&buffer).map_err(|_| HypervisorError::ParseError)?;
 	let kernel_offset = 128 * BasePageSize::SIZE;
@@ -249,7 +248,7 @@ async fn store_image(
 		));
 	}
 
-	if let Err(e) = create_dir("/image")
+	if let Err(e) = create_dir("/image").await
 		&& e.kind() != tokio::io::ErrorKind::AlreadyExists
 	{
 		return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
@@ -257,8 +256,10 @@ async fn store_image(
 
 	let path = format!("/image/{name}");
 	let mut file = File::create(&path)
+		.await
 		.map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 	file.write_all(&body)
+		.await
 		.map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
 	let msg = format!("stored {} bytes at {path}\n", body.len());
@@ -309,7 +310,7 @@ async fn run_guest(
 	Ok(response)
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
 	println!("Initialize rhyve");
 

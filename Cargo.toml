@@ -27,7 +27,7 @@ time = { version = "0.3", default-features = false }
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 hermit = { git = "https://github.com/hermit-os/hermit-rs.git", branch = "main", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-tokio = { version = "1", features = ["rt", "net", "macros", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "sync", "fs", "io-util"] }
 tokio-stream = { version = "0.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 

@@ -859,6 +859,7 @@ version = "1.45.0"
 source = "git+https://github.com/hermit-os/tokio.git?branch=v%2Ftokio-1.45.0#0e86dc7f13d850f579049761dc2d28eebcc2bf1c"
 dependencies = [
  "backtrace",
+ "bytes",
  "hermit-abi",
  "libc",
  "mio",
