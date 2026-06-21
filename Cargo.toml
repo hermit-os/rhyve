@@ -21,7 +21,7 @@ rhyve-x86 = { path = "crates/rhyve-x86" }
 rhyve-core = { path = "crates/rhyve-core" }
 log = { version = "0.4", default-features = false }
 x86_64 = "0.15"
-hermit-entry = { version = "0.10.3", features = ["loader"] }
+hermit-entry = { version = "0.10.10", features = ["loader"] }
 hermit-sync = "0.1"
 time = { version = "0.3", default-features = false }
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
