@@ -6,7 +6,7 @@ mod vmxon;
 
 use alloc::boxed::Box;
 use core::arch::asm;
-use core::arch::x86_64::__cpuid_count;
+use core::arch::x86_64::{__cpuid_count, _rdtsc};
 use core::mem::MaybeUninit;
 
 pub use ept::{Ept, NestedPaging, Page};
@@ -21,7 +21,7 @@ use x86_64::registers::rflags::{self, RFlags};
 
 use crate::virtual_to_physical;
 use crate::vmx::run::run_vmx_vm;
-use crate::vmx::vmcs::{Vmcs, guest, ro};
+use crate::vmx::vmcs::{Vmcs, control, guest, ro};
 use crate::vmx::vmxon::Vmxon;
 
 /// Reporting Register of Basic VMX Capabilities (R/O) See Table 35-2. See Appendix A.1, Basic VMX Information (If CPUID.01H:ECX.\[bit 9\])
@@ -34,12 +34,50 @@ pub const IA32_VMX_CR0_FIXED1: u32 = 0x487;
 pub const IA32_VMX_CR4_FIXED0: u32 = 0x488;
 /// Capability Reporting Register of CR4 Bits Fixed to 1 (R/O) See Appendix A.8, VMX-Fixed Bits in CR4 (If CPUID.01H:ECX.\[bit 9\])
 pub const IA32_VMX_CR4_FIXED1: u32 = 0x489;
+/// Miscellaneous VMX capabilities. Bits 4:0 hold the rate (as a right-shift of
+/// the TSC) at which the VMX-preemption timer counts down.
+const IA32_VMX_MISC: u32 = 0x485;
+
+/// x2APIC timer registers, accessed by the guest via RDMSR/WRMSR. Without an MSR
+/// bitmap every access causes an exit, so the local-APIC timer can be emulated
+/// entirely in the WRMSR handler.
+const IA32_TSC_DEADLINE: u32 = 0x6e0;
+const IA32_X2APIC_LVT_TIMER: u32 = 0x832;
+const IA32_X2APIC_INIT_COUNT: u32 = 0x838;
+
+/// LVT timer-mode field (bits 18:17): one-shot, periodic or TSC-deadline.
+const LVT_TIMER_MODE_MASK: u64 = 0b11 << 17;
+const LVT_TIMER_MODE_PERIODIC: u64 = 0b01 << 17;
+const LVT_TIMER_MODE_TSC_DEADLINE: u64 = 0b10 << 17;
+/// LVT mask bit (bit 16): when set, the timer interrupt is suppressed.
+const LVT_MASKED: u64 = 1 << 16;
 
 /* desired control word constrained by hardware/hypervisor capabilities */
 /*#[inline(always)]
 fn cap2ctrl(cap: u64, ctrl: u64) -> u64 {
 	(ctrl | (cap & 0xffffffff)) & (cap >> 32)
 }*/
+
+/// Emulated state of the guest's local-APIC timer (programmed via x2APIC MSRs).
+///
+/// VT-x APIC virtualization does not model the local-APIC timer, so the guest's
+/// writes to the timer registers are captured here and turned into a host
+/// deadline that the VMX-preemption timer raises a VM-exit on.
+#[derive(Default)]
+struct ApicTimer {
+	/// Interrupt vector to inject, taken from the LVT timer register.
+	vector: u8,
+	/// Whether the timer interrupt is currently masked (LVT bit 16).
+	masked: bool,
+	/// Whether the LVT timer is in TSC-deadline mode.
+	tsc_deadline_mode: bool,
+	/// Whether the LVT timer is in periodic mode (re-arm after each expiry).
+	periodic: bool,
+	/// Absolute host-TSC value at which the timer should next fire, if armed.
+	deadline: Option<u64>,
+	/// Period in TSC ticks, used to re-arm a periodic timer after it expires.
+	period: Option<u64>,
+}
 
 /// The Intel VT-x backend of a single virtual CPU.
 ///
@@ -76,6 +114,17 @@ pub struct VmxCpu {
 
 	/// Guest initial stack pointer.
 	guest_rsp: u64,
+
+	/// Emulated local-APIC timer state.
+	apic_timer: ApicTimer,
+
+	/// Interrupt vector waiting to be injected into the guest (e.g. an expired
+	/// timer), if the guest could not accept it at the time it became pending.
+	pending_vector: Option<u8>,
+
+	/// Right-shift applied to the TSC to obtain the VMX-preemption timer's tick
+	/// rate (`IA32_VMX_MISC[4:0]`).
+	preempt_scale: u8,
 }
 
 impl VmxCpu {
@@ -215,6 +264,103 @@ impl VmxCpu {
 		self.vmx_capture_status()
 	}
 
+	/// Records a guest write to a local-APIC timer MSR, updating the emulated
+	/// timer and its host-TSC deadline. As no TSC offsetting is configured, the
+	/// guest's RDTSC reads the host TSC, so a programmed TSC deadline is directly
+	/// comparable to the host's `_rdtsc()`.
+	fn write_apic_timer_msr(&mut self, msr: u32, value: u64) {
+		match msr {
+			IA32_X2APIC_LVT_TIMER => {
+				self.apic_timer.vector = (value & 0xff) as u8;
+				self.apic_timer.masked = value & LVT_MASKED != 0;
+				let mode = value & LVT_TIMER_MODE_MASK;
+				self.apic_timer.tsc_deadline_mode = mode == LVT_TIMER_MODE_TSC_DEADLINE;
+				self.apic_timer.periodic = mode == LVT_TIMER_MODE_PERIODIC;
+				// Masking the timer disarms any pending deadline.
+				if self.apic_timer.masked {
+					self.apic_timer.deadline = None;
+					self.apic_timer.period = None;
+				}
+			}
+			IA32_TSC_DEADLINE => {
+				// Absolute TSC deadline; writing 0 disarms the timer.
+				self.apic_timer.deadline = (value != 0 && !self.apic_timer.masked).then_some(value);
+				self.apic_timer.period = None; // TSC-deadline mode is one-shot
+			}
+			IA32_X2APIC_INIT_COUNT => {
+				// One-shot / periodic count mode. The APIC timer input frequency is
+				// not recovered here; approximate one count as one TSC tick, which
+				// keeps the interval in the right ballpark. Guests that support the
+				// TSC-deadline timer (the common case) use the MSR above instead.
+				if value == 0 || self.apic_timer.masked || self.apic_timer.tsc_deadline_mode {
+					self.apic_timer.deadline = None;
+					self.apic_timer.period = None;
+				} else {
+					let ticks = value;
+					self.apic_timer.deadline = Some(unsafe { _rdtsc() } + ticks);
+					self.apic_timer.period = self.apic_timer.periodic.then_some(ticks);
+				}
+			}
+			_ => {}
+		}
+	}
+
+	/// Arms the VMX-preemption timer for the time remaining until the emulated
+	/// APIC timer's deadline. With no timer armed it is set to its maximum so a
+	/// spurious expiry (which the handler ignores) is far off.
+	fn arm_preemption_timer(&self) -> Result<(), HypervisorError> {
+		let value = match self.apic_timer.deadline {
+			Some(deadline) => {
+				let remaining = deadline.saturating_sub(unsafe { _rdtsc() });
+				(remaining >> self.preempt_scale).min(u64::from(u32::MAX))
+			}
+			None => u64::from(u32::MAX),
+		};
+		self.vmcs_region
+			.write(guest::VMX_PREEMPTION_TIMER_VALUE, value)
+	}
+
+	/// Delivers a pending interrupt vector to the guest before VM-entry. Injects
+	/// directly if the guest can accept an interrupt now; otherwise requests an
+	/// interrupt-window exit so the attempt is retried once it unblocks.
+	fn inject_pending(&mut self) -> Result<(), HypervisorError> {
+		let Some(vector) = self.pending_vector else {
+			return Ok(());
+		};
+
+		let rflags = self.vmcs_region.read(guest::RFLAGS)?;
+		let interruptibility = self.vmcs_region.read(guest::INTERRUPTIBILITY_STATE)?;
+		let interruptible = rflags & (1 << 9) != 0 // RFLAGS.IF
+			&& interruptibility & 0b11 == 0; // not blocked by STI / MOV SS
+
+		if interruptible {
+			// Valid (bit 31) | external-interrupt type (bits 10:8 = 0) | vector.
+			let info = (1u64 << 31) | u64::from(vector);
+			self.vmcs_region
+				.write(control::VMENTRY_INTERRUPTION_INFO_FIELD, info)?;
+			self.pending_vector = None;
+			self.set_interrupt_window(false)?;
+		} else {
+			self.set_interrupt_window(true)?;
+		}
+		Ok(())
+	}
+
+	/// Enables or disables interrupt-window exiting in the primary controls.
+	fn set_interrupt_window(&self, enable: bool) -> Result<(), HypervisorError> {
+		const INTERRUPT_WINDOW_EXITING: u64 = 1 << 2;
+		let mut ctrls = self
+			.vmcs_region
+			.read(control::PRIMARY_PROCBASED_EXEC_CONTROLS)?;
+		if enable {
+			ctrls |= INTERRUPT_WINDOW_EXITING;
+		} else {
+			ctrls &= !INTERRUPT_WINDOW_EXITING;
+		}
+		self.vmcs_region
+			.write(control::PRIMARY_PROCBASED_EXEC_CONTROLS, ctrls)
+	}
+
 	/// Creates and fully initializes the VT-x backend of a vCPU.
 	///
 	/// `eptp` is the VM-wide EPT pointer, `cpu_id` becomes the guest's RSI (CPU
@@ -237,6 +383,10 @@ impl VmxCpu {
 			..GuestRegisters::default()
 		};
 
+		// The VMX-preemption timer decrements at the TSC rate shifted right by the
+		// value in IA32_VMX_MISC[4:0]; cache it for arming the timer.
+		let preempt_scale = (unsafe { Msr::new(IA32_VMX_MISC).read() } & 0x1f) as u8;
+
 		let mut cpu: VmxCpu = Self {
 			vmcs_region: Box::new(unsafe { MaybeUninit::zeroed().assume_init() }),
 			vmxon_region: Box::new(unsafe { MaybeUninit::zeroed().assume_init() }),
@@ -245,6 +395,9 @@ impl VmxCpu {
 			launched: false,
 			entry_point,
 			guest_rsp,
+			apic_timer: ApicTimer::default(),
+			pending_vector: None,
+			preempt_scale,
 		};
 
 		cpu.init()?;
@@ -269,6 +422,12 @@ impl VcpuBackend<GuestRegisters> for VmxCpu {
 		// Mirror the cached RIP/RSP/RFLAGS into the VMCS so a VMRESUME continues
 		// where the previous VM-exit left off.
 		self.vmcs_region.load_guest_registers(&self.regs)?;
+
+		// Emulated local-APIC timer: deliver an expired timer interrupt if one is
+		// pending and the guest can take it, then arm the preemption timer for the
+		// time remaining until the next deadline.
+		self.inject_pending()?;
+		self.arm_preemption_timer()?;
 
 		// Enter the guest. Returns the RFLAGS produced by VMLAUNCH/VMRESUME.
 		let flags = unsafe { run_vmx_vm(&mut self.regs) };
@@ -304,6 +463,8 @@ impl VcpuBackend<GuestRegisters> for VmxCpu {
 					vmcs::IA32_FS_BASE => self.vmcs_region.read(guest::FS_BASE)?,
 					vmcs::IA32_GS_BASE => self.vmcs_region.read(guest::GS_BASE)?,
 					vmcs::IA32_EFER => self.vmcs_region.read(guest::IA32_EFER_FULL)?,
+					// Mirror back the armed local-APIC timer deadline.
+					IA32_TSC_DEADLINE => self.apic_timer.deadline.unwrap_or(0),
 					_ => 0, // unknown MSR: read as zero
 				};
 				self.regs.rax = value & 0xffff_ffff; // EAX = low
@@ -317,10 +478,16 @@ impl VcpuBackend<GuestRegisters> for VmxCpu {
 			}
 			VmxBasicExitReason::Wrmsr => {
 				let value = (self.regs.rdx << 32) | (self.regs.rax & 0xffff_ffff);
-				match self.regs.rcx as u32 {
+				let msr = self.regs.rcx as u32;
+				match msr {
 					vmcs::IA32_FS_BASE => self.vmcs_region.write(guest::FS_BASE, value)?,
 					vmcs::IA32_GS_BASE => self.vmcs_region.write(guest::GS_BASE, value)?,
 					vmcs::IA32_EFER => self.vmcs_region.write(guest::IA32_EFER_FULL, value)?,
+					// Local-APIC timer programming (x2APIC): record it and let the
+					// preemption timer raise the interrupt when the deadline elapses.
+					IA32_X2APIC_LVT_TIMER | IA32_TSC_DEADLINE | IA32_X2APIC_INIT_COUNT => {
+						self.write_apic_timer_msr(msr, value);
+					}
 					_ => {} // ignorieren oder #GP
 				}
 
@@ -374,6 +541,25 @@ impl VcpuBackend<GuestRegisters> for VmxCpu {
 				self.regs.rip += len;
 
 				Ok(ExitReason::IoInstruction(q))
+			}
+			VmxBasicExitReason::VmxPreemptionTimerExpired => {
+				// The emulated local-APIC timer deadline elapsed. Make its vector
+				// pending (injected on the next entry, once the guest is
+				// interruptible) and re-arm a periodic timer for the next period.
+				if let Some(deadline) = self.apic_timer.deadline.take() {
+					if !self.apic_timer.masked {
+						self.pending_vector = Some(self.apic_timer.vector);
+					}
+					if let Some(period) = self.apic_timer.period {
+						self.apic_timer.deadline = Some(deadline.saturating_add(period));
+					}
+				}
+				Ok(ExitReason::Success)
+			}
+			VmxBasicExitReason::InterruptWindow => {
+				// The guest just became interruptible; a pending vector is injected
+				// on the next entry by `inject_pending`.
+				Ok(ExitReason::Success)
 			}
 			VmxBasicExitReason::TripleFault => {
 				// Triple fault is used to shutdown the system

@@ -808,9 +808,14 @@ impl Vmcs {
 		// the guest, so a host device interrupt (timer, NIC, ...) arriving while
 		// the guest runs is handled by the host. The host stays responsive during
 		// the run and need not disable interrupts for its whole duration.
+		// The VMX-preemption timer counts down in guest mode and forces a VM-exit
+		// when it reaches zero; it is how the local-APIC timer is emulated (the
+		// run loop arms it with the time remaining until the guest's programmed
+		// deadline and injects the timer vector when it expires).
 		let pinbased = adjust_control(
 			VmxControl::PinBased,
-			PinbasedControls::EXTERNAL_INTERRUPT_EXITING.bits() as u64,
+			(PinbasedControls::EXTERNAL_INTERRUPT_EXITING | PinbasedControls::VMX_PREEMPTION_TIMER)
+				.bits() as u64,
 		);
 		// Activate the secondary controls so EPT can be enabled, and make all I/O
 		// instructions cause a VM-exit so the guest's port I/O can be emulated.
