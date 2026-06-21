@@ -2,9 +2,11 @@
 
 rhyve is a bare-metal hypervisor on top of the [Hermit kernel](https://github.com/hermit-os/kernel).
 
-rhyve itself runs as a Hermit unikernel and boots a *nested* guest inside it. It
+rhyve itself runs as a Hermit unikernel and boots a guest inside a VM. It
 exposes a small web service: upload a guest image, run it, and watch the guest's
 serial output stream back to your browser.
+
+![Screenshot of the running web service](images/rhyve.png)
 
 ## Requirements
 
