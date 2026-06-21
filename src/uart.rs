@@ -132,4 +132,21 @@ impl Uart {
 		}
 		None
 	}
+
+	/// Write a buffer to the uart device
+	pub fn write_buffer(&mut self, buf: Vec<u8>) {
+		let mut data: Vec<u8> = Vec::new();
+
+		for value in buf {
+			// never blocks the guest.
+			let filtered = self.ansi_filter(value);
+			if let Some(out) = filtered {
+				data.push(out);
+			}
+		}
+
+		if let Some(sink) = &self.sink {
+			let _ = sink.send(data);
+		}
+	}
 }

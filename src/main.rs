@@ -83,11 +83,11 @@ fn init_hypervisor(
 	info!("Using image {image:?}");
 
 	// Create slice for the guest
-	let guest_size = 256 << 20; // create VM with a memory size of 256 MiB
+	let guest_size = 512 << 20; // create VM with a memory size of 256 MiB
 	let layout =
 		unsafe { Layout::from_size_align_unchecked(guest_size, LargePageSize::SIZE as usize) };
 	// Keep the allocation around so it can be freed after the run (otherwise every
-	// `/run` would leak 256 MiB).
+	// `/run` would leak 512 MiB).
 	let allocation = Global.allocate(layout).unwrap();
 	let guest_slice = unsafe { allocation.as_uninit_slice_mut() };
 	// `Global.allocate` returns uninitialized memory; the guest expects its RAM
@@ -369,7 +369,7 @@ async fn run_guest(
 async fn main() {
 	println!("Initialize rhyve");
 
-	simple_logger::init_with_level(log::Level::Debug).unwrap();
+	simple_logger::init_with_level(log::Level::Info).unwrap();
 
 	match check_supported_cpu() {
 		Ok(HypervisorExtension::Vmx) => println!("Using the Intel VT-x (VMX) backend"),

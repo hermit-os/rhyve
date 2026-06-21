@@ -3,6 +3,26 @@
 version = 4
 
 [[package]]
+name = "aarch64"
+version = "0.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2df0852593ebb4ed15e4fce123daf16a272b8d4449ae75050d6b9d7cea461a21"
+dependencies = [
+ "aarch64-cpu",
+ "memory_addresses 0.2.3",
+ "tock-registers",
+]
+
+[[package]]
+name = "aarch64-cpu"
+version = "10.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a21cd0131c25c438e19cd6a774adf7e3f64f7f4d723022882facc2dee0f8bc9"
+dependencies = [
+ "tock-registers",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -28,6 +48,12 @@ dependencies = [
  "version_check",
  "zerocopy",
 ]
+
+[[package]]
+name = "align-address"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ac6c08a67736554282858203cd9b7ff53cf55f54c34e85689962748a350cbf0"
 
 [[package]]
 name = "align-address"
@@ -319,7 +345,7 @@ version = "0.10.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77e69cdfe59e70c3c9b9b361e1fa0052aa8c08a746b6837a0258b7cfab46b67c"
 dependencies = [
- "align-address",
+ "align-address 0.4.0",
  "byte-unit",
  "const_parse",
  "goblin",
@@ -495,6 +521,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
+name = "memory_addresses"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01af0509edc73791972185a4ed1e3e8b2d0f21c3c527f96078586446b61750c4"
+dependencies = [
+ "align-address 0.3.0",
+ "cfg-if",
+]
+
+[[package]]
+name = "memory_addresses"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b0d19077c1bd58a846e275c3bb80527600ab8afbfb2768a80eb39f77cf93f1d"
+dependencies = [
+ "align-address 0.4.0",
+ "cfg-if",
+ "x86_64",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -556,6 +603,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "num_enum"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
+dependencies = [
+ "num_enum_derive",
+ "rustversion",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -658,8 +726,9 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
+ "uhyve-interface",
  "vm-fdt",
- "x86_64 0.14.13",
+ "x86_64",
 ]
 
 [[package]]
@@ -682,7 +751,7 @@ dependencies = [
  "num-traits",
  "raw-cpuid",
  "rhyve-core",
- "x86_64 0.15.4",
+ "x86_64",
 ]
 
 [[package]]
@@ -899,6 +968,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tock-registers"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b9e2fdb3a1e862c0661768b7ed25390811df1947a8acbfbefe09b47078d93c4"
+
+[[package]]
 name = "tokio"
 version = "1.45.0"
 source = "git+https://github.com/hermit-os/tokio.git?branch=v%2Ftokio-1.45.0#0e86dc7f13d850f579049761dc2d28eebcc2bf1c"
@@ -992,6 +1067,19 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "uhyve-interface"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f9fe9717fe011743d97a5dc1f552656ff2dc934af940261c22fe353c55acd42"
+dependencies = [
+ "aarch64",
+ "hermit-abi",
+ "memory_addresses 0.3.0",
+ "num_enum",
+ "x86_64",
+]
 
 [[package]]
 name = "unicode-ident"
@@ -1125,18 +1213,6 @@ name = "winnow"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
-
-[[package]]
-name = "x86_64"
-version = "0.14.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c101112411baafbb4bf8d33e4c4a80ab5b02d74d2612331c61e8192fc9710491"
-dependencies = [
- "bit_field",
- "bitflags",
- "rustversion",
- "volatile",
-]
 
 [[package]]
 name = "x86_64"

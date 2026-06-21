@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use hermit_sync::SpinMutex;
 use rhyve_core::error::*;
 use tokio::sync::mpsc::UnboundedSender;
+use x86_64::VirtAddr;
 
 use crate::svm::Npt;
 use crate::uart::Uart;
@@ -28,6 +29,19 @@ pub struct VmConfig {
 pub const LAPIC_BASE: u64 = 0xFEE0_0000;
 /// Guest-physical base of the I/O APIC MMIO.
 pub const IOAPIC_BASE: u64 = 0xFEC0_0000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct VmMemoryLayout {
+	pub start_addr: VirtAddr,
+	#[allow(dead_code)]
+	pub len: usize,
+}
+
+impl VmMemoryLayout {
+	pub fn new(start_addr: VirtAddr, len: usize) -> Self {
+		Self { start_addr, len }
+	}
+}
 
 /// A virtual machine: the guest's physical address space plus the set of virtual
 /// CPUs that execute within it.
@@ -54,6 +68,8 @@ pub struct Vm {
 	ioapic_page: Box<Page>,
 	/// Host-physical address of the APIC-access page, handed to each vCPU.
 	apic_access_hpa: u64,
+	/// Describe the host memory layout of the VM
+	mem: VmMemoryLayout,
 	/// The virtual CPUs managed by this VM.
 	cpus: Vec<Cpu>,
 }
@@ -98,6 +114,7 @@ impl VirtualMachine for Vm {
 			apic_access_page,
 			ioapic_page,
 			apic_access_hpa,
+			mem: VmMemoryLayout::new(VirtAddr::from_ptr(config.guest_base), config.guest_size),
 			cpus: Vec::new(),
 		})
 	}
@@ -133,8 +150,13 @@ impl Vm {
 			stack_pointer,
 		};
 		let vcpu_id = self.cpus.len();
-		self.cpus
-			.push(Cpu::new(self.id, vcpu_id, self.uart.clone(), config));
+		self.cpus.push(Cpu::new(
+			self.id,
+			vcpu_id,
+			self.uart.clone(),
+			self.mem,
+			config,
+		));
 
 		Ok(self.cpus.last_mut().unwrap())
 	}

@@ -21,7 +21,7 @@ rhyve-x86 = { path = "crates/rhyve-x86" }
 rhyve-core = { path = "crates/rhyve-core" }
 log = "0.4"
 simple_logger = "5.2"
-x86_64 = "0.14.7"
+x86_64 = "0.15"
 hermit-entry = { version = "0.10.10", features = ["loader"] }
 hermit-sync = "0.1"
 time = { version = "0.3", default-features = false }
@@ -31,6 +31,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "sync", "fs", "io-util"] }
 tokio-stream = { version = "0.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
+uhyve-interface = "0.2.0"
 
 [features]
 default = ["pci", "pci-ids", "fsgsbase", "kernel-stack", "acpi", "dns", "dhcpv4", "tcp", "udp", "virtio-net", "virtio-fs", "virtio-vsock"]
