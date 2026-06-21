@@ -369,6 +369,8 @@ async fn run_guest(
 async fn main() {
 	println!("Initialize rhyve");
 
+	simple_logger::init_with_level(log::Level::Debug).unwrap();
+
 	match check_supported_cpu() {
 		Ok(HypervisorExtension::Vmx) => println!("Using the Intel VT-x (VMX) backend"),
 		Ok(HypervisorExtension::Svm) => println!("Using the AMD-V (SVM) backend"),

@@ -19,8 +19,9 @@ members = [
 [dependencies]
 rhyve-x86 = { path = "crates/rhyve-x86" }
 rhyve-core = { path = "crates/rhyve-core" }
-log = { version = "0.4", default-features = false }
-x86_64 = "0.15"
+log = "0.4"
+simple_logger = "5.2"
+x86_64 = "0.14.7"
 hermit-entry = { version = "0.10.10", features = ["loader"] }
 hermit-sync = "0.1"
 time = { version = "0.3", default-features = false }
