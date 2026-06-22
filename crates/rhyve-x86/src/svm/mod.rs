@@ -15,7 +15,7 @@ mod vmcb;
 use alloc::alloc::{Layout, alloc};
 use alloc::boxed::Box;
 use core::arch::asm;
-use core::arch::x86_64::__cpuid_count;
+use core::arch::x86_64::{__cpuid_count, _rdtsc};
 use core::mem::MaybeUninit;
 
 pub use npt::Npt;
@@ -28,6 +28,8 @@ use x86_64::addr::VirtAddr;
 use x86_64::registers::model_specific::Msr;
 use x86_64::structures::paging::page::{PageSize, Size4KiB as BasePageSize};
 
+use crate::apic::*;
+use crate::fpu::FpuState;
 use crate::virtual_to_physical;
 
 /// IA32_EFER model-specific register.
@@ -123,6 +125,18 @@ pub struct SvmCpu {
 
 	/// Saved guest general-purpose registers.
 	regs: GuestRegisters,
+
+	/// Emulated local-APIC timer state.
+	apic_timer: ApicTimer,
+
+	/// Interrupt vector waiting to be injected into the guest (e.g. an expired
+	/// timer), if the guest could not accept it at the time it became pending.
+	pending_vector: Option<u8>,
+
+	/// The guest's extended FP state, preserved across runs ([`fpu`](crate::fpu)).
+	guest_fpu: Box<FpuState>,
+	/// Scratch area holding the host's FP state while the guest runs.
+	host_fpu: Box<FpuState>,
 }
 
 impl SvmCpu {
@@ -171,6 +185,10 @@ impl SvmCpu {
 			host_vmcb_pa,
 			host_save_pa,
 			regs,
+			apic_timer: ApicTimer::default(),
+			pending_vector: None,
+			guest_fpu: Box::new(FpuState::init_guest()),
+			host_fpu: Box::new(FpuState::scratch()),
 		};
 
 		cpu.vmcb
@@ -204,6 +222,8 @@ impl SvmCpu {
 			IA32_FS_BASE => self.vmcb.read_u64(vmcb::FS_BASE),
 			IA32_GS_BASE => self.vmcb.read_u64(vmcb::GS_BASE),
 			IA32_EFER => self.vmcb.read_u64(vmcb::EFER) & !vmcb::EFER_SVME,
+			// Mirror back the armed local-APIC timer deadline.
+			IA32_TSC_DEADLINE => self.apic_timer.deadline.unwrap_or(0),
 			_ => 0,
 		}
 	}
@@ -216,7 +236,95 @@ impl SvmCpu {
 			IA32_FS_BASE => self.vmcb.write_u64(vmcb::FS_BASE, value),
 			IA32_GS_BASE => self.vmcb.write_u64(vmcb::GS_BASE, value),
 			IA32_EFER => self.vmcb.write_u64(vmcb::EFER, value | vmcb::EFER_SVME),
+			// Local-APIC timer programming (x2APIC): record it and let the run loop
+			// inject the interrupt when the deadline elapses.
+			IA32_X2APIC_LVT_TIMER | IA32_TSC_DEADLINE | IA32_X2APIC_INIT_COUNT => {
+				self.write_apic_timer_msr(index, value);
+			}
 			_ => {}
+		}
+	}
+
+	/// Records a guest write to a local-APIC timer MSR, updating the emulated
+	/// timer and its host-TSC deadline. As no TSC offsetting is configured, the
+	/// guest's RDTSC reads the host TSC, so a programmed TSC deadline is directly
+	/// comparable to the host's `_rdtsc()`. Mirrors the VT-x backend.
+	fn write_apic_timer_msr(&mut self, msr: u32, value: u64) {
+		match msr {
+			IA32_X2APIC_LVT_TIMER => {
+				self.apic_timer.vector = (value & 0xff) as u8;
+				self.apic_timer.masked = value & LVT_MASKED != 0;
+				let mode = value & LVT_TIMER_MODE_MASK;
+				self.apic_timer.tsc_deadline_mode = mode == LVT_TIMER_MODE_TSC_DEADLINE;
+				self.apic_timer.periodic = mode == LVT_TIMER_MODE_PERIODIC;
+				// Masking the timer disarms any pending deadline.
+				if self.apic_timer.masked {
+					self.apic_timer.deadline = None;
+					self.apic_timer.period = None;
+				}
+			}
+			IA32_TSC_DEADLINE => {
+				// Absolute TSC deadline; writing 0 disarms the timer.
+				self.apic_timer.deadline = (value != 0 && !self.apic_timer.masked).then_some(value);
+				self.apic_timer.period = None; // TSC-deadline mode is one-shot
+			}
+			IA32_X2APIC_INIT_COUNT => {
+				// One-shot / periodic count mode. The APIC timer input frequency is
+				// not recovered here; approximate one count as one TSC tick, which
+				// keeps the interval in the right ballpark. Guests that support the
+				// TSC-deadline timer (the common case) use the MSR above instead.
+				if value == 0 || self.apic_timer.masked || self.apic_timer.tsc_deadline_mode {
+					self.apic_timer.deadline = None;
+					self.apic_timer.period = None;
+				} else {
+					let ticks = value;
+					self.apic_timer.deadline = Some(unsafe { _rdtsc() } + ticks);
+					self.apic_timer.period = self.apic_timer.periodic.then_some(ticks);
+				}
+			}
+			_ => {}
+		}
+	}
+
+	/// Services the emulated APIC timer before a `VMRUN`: if its deadline has
+	/// elapsed, makes the timer vector pending and re-arms a periodic timer for the
+	/// next period. Called on every exit, so a busy guest is polled through its
+	/// natural exits and an idle one through the intercepted HLT exits.
+	fn service_timer(&mut self) {
+		let Some(deadline) = self.apic_timer.deadline else {
+			return;
+		};
+		if unsafe { _rdtsc() } < deadline {
+			return;
+		}
+
+		self.apic_timer.deadline = None;
+		if !self.apic_timer.masked {
+			self.pending_vector = Some(self.apic_timer.vector);
+		}
+		if let Some(period) = self.apic_timer.period {
+			self.apic_timer.deadline = Some(deadline.saturating_add(period));
+		}
+	}
+
+	/// Injects a pending interrupt vector into the guest via the VMCB event-
+	/// injection field, but only once the guest is interruptible — an injected
+	/// event ignores `RFLAGS.IF`, so delivering it while interrupts are masked
+	/// would violate the guest's expectations. While not interruptible the vector
+	/// stays pending and is retried on the next exit. The field is rewritten every
+	/// entry (the processor does not clear it) so a stale event is never replayed.
+	fn inject_pending(&mut self) {
+		let interruptible = self.regs.rflags & (1 << 9) != 0 // RFLAGS.IF
+			&& self.vmcb.read_u64(vmcb::INT_STATE) & 1 == 0; // no interrupt shadow
+
+		match self.pending_vector {
+			Some(vector) if interruptible => {
+				// Valid (bit 31) | external-interrupt type (bits 10:8 = 0) | vector.
+				let event = (1u64 << 31) | u64::from(vector);
+				self.vmcb.write_u64(vmcb::EVENTINJ, event);
+				self.pending_vector = None;
+			}
+			_ => self.vmcb.write_u64(vmcb::EVENTINJ, 0),
 		}
 	}
 }
@@ -237,8 +345,25 @@ impl VcpuBackend<GuestRegisters> for SvmCpu {
 		self.vmcb.write_u64(vmcb::RSP, self.regs.rsp);
 		self.vmcb.write_u64(vmcb::RFLAGS, self.regs.rflags);
 
+		// Emulated local-APIC timer: AMD-V has no preemption timer, so poll the
+		// deadline here and inject the expired timer interrupt once the guest can
+		// take it (the vector stays pending otherwise).
+		self.service_timer();
+		self.inject_pending();
+
+		// Swap the host's live FP state out for the guest's so the guest's
+		// register file survives the run (VMRUN preserves none of it); see
+		// [`fpu`](crate::fpu).
+		self.host_fpu.save();
+		self.guest_fpu.restore();
+
 		// Enter the guest. The trampoline saves/restores the remaining GPRs.
 		unsafe { run_svm_vm(&mut self.regs, self.vmcb_pa, self.host_vmcb_pa) };
+
+		// Capture the guest's FP state and put the host's back before any host
+		// code (which may use FP) runs again.
+		self.guest_fpu.save();
+		self.host_fpu.restore();
 
 		// #VMEXIT occurred: refresh the cached RAX/RIP/RSP/RFLAGS and decode.
 		self.regs.rax = self.vmcb.read_u64(vmcb::RAX);
@@ -257,6 +382,14 @@ impl VcpuBackend<GuestRegisters> for SvmCpu {
 			}
 			exitcode::PAUSE => {
 				self.regs.rip += 2;
+				Ok(ExitReason::Success)
+			}
+			exitcode::HLT => {
+				// The guest halted waiting for an interrupt. Advance past the HLT
+				// (`F4`, one byte) and resume: the emulated APIC timer is polled and
+				// injected before the next entry, so an idle guest keeps making
+				// progress instead of stalling for want of a timed exit.
+				self.regs.rip += 1;
 				Ok(ExitReason::Success)
 			}
 			exitcode::CPUID => {

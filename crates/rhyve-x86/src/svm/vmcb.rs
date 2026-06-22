@@ -29,6 +29,9 @@ const IOPM_BASE_PA: usize = 0x040;
 const MSRPM_BASE_PA: usize = 0x048;
 /// Guest ASID (bits 31:0) and TLB-control byte (bits 39:32).
 const GUEST_ASID: usize = 0x058;
+/// Guest interrupt-state field; bit 0 is the interrupt shadow (set after `STI` /
+/// `MOV SS`, when an interrupt may not yet be delivered).
+pub const INT_STATE: usize = 0x068;
 /// `#VMEXIT` reason.
 pub const EXITCODE: usize = 0x070;
 /// `#VMEXIT` information field 1.
@@ -39,6 +42,11 @@ pub const EXITINFO2: usize = 0x080;
 const NP_ENABLE: usize = 0x090;
 /// Nested CR3 (`nCR3`).
 const N_CR3: usize = 0x0B0;
+/// Event-injection field: an event the processor delivers to the guest on the
+/// next `VMRUN` (valid bit 31, type bits 10:8, vector bits 7:0). Unlike the
+/// guest's own pending interrupts, an injected event ignores `RFLAGS.IF`, so the
+/// backend gates injection on guest interruptibility itself.
+pub const EVENTINJ: usize = 0x0A8;
 /// Next sequential instruction pointer (valid for many intercepts when the CPU
 /// supports the NRIPS feature).
 pub const NRIP: usize = 0x0C8;
@@ -49,6 +57,7 @@ pub const NRIP: usize = 0x0C8;
 /// the guest, so the host keeps ownership of its own device interrupts.
 const INTERCEPT_INTR: u32 = 1 << 0;
 const INTERCEPT_CPUID: u32 = 1 << 18;
+const INTERCEPT_HLT: u32 = 1 << 24;
 const INTERCEPT_PAUSE: u32 = 1 << 23;
 const INTERCEPT_IOIO: u32 = 1 << 27;
 const INTERCEPT_MSR: u32 = 1 << 28;
@@ -166,11 +175,15 @@ impl Vmcb {
 	pub fn setup_control(&mut self, ncr3: u64, iopm_pa: u64, msrpm_pa: u64) {
 		// Intercept the instructions the backend emulates on the host's behalf,
 		// plus physical interrupts so the host stays responsive while the guest
-		// runs (see `INTERCEPT_INTR`).
+		// runs (see `INTERCEPT_INTR`). HLT is intercepted so an idle guest hands
+		// control back to the backend, which polls the emulated APIC-timer deadline
+		// there — AMD-V has no VMX-preemption-timer equivalent to raise a timed
+		// exit on its own.
 		self.write_u32(
 			INTERCEPT_INSTR1,
 			INTERCEPT_INTR
 				| INTERCEPT_CPUID
+				| INTERCEPT_HLT
 				| INTERCEPT_PAUSE
 				| INTERCEPT_IOIO
 				| INTERCEPT_MSR

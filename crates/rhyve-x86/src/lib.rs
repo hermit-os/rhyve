@@ -10,6 +10,8 @@
 extern crate log;
 extern crate alloc;
 
+pub(crate) mod apic;
+pub mod fpu;
 pub mod svm;
 pub mod vmx;
 

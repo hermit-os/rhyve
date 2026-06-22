@@ -19,10 +19,18 @@ use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
 use x86_64::registers::rflags::{self, RFlags};
 
+use crate::apic::*;
+use crate::fpu::FpuState;
 use crate::virtual_to_physical;
 use crate::vmx::run::run_vmx_vm;
 use crate::vmx::vmcs::{Vmcs, control, guest, ro};
 use crate::vmx::vmxon::Vmxon;
+
+/* desired control word constrained by hardware/hypervisor capabilities */
+/*#[inline(always)]
+fn cap2ctrl(cap: u64, ctrl: u64) -> u64 {
+	(ctrl | (cap & 0xffffffff)) & (cap >> 32)
+}*/
 
 /// Reporting Register of Basic VMX Capabilities (R/O) See Table 35-2. See Appendix A.1, Basic VMX Information (If CPUID.01H:ECX.\[bit 9\])
 const IA32_VMX_BASIC: u32 = 0x480;
@@ -37,47 +45,6 @@ pub const IA32_VMX_CR4_FIXED1: u32 = 0x489;
 /// Miscellaneous VMX capabilities. Bits 4:0 hold the rate (as a right-shift of
 /// the TSC) at which the VMX-preemption timer counts down.
 const IA32_VMX_MISC: u32 = 0x485;
-
-/// x2APIC timer registers, accessed by the guest via RDMSR/WRMSR. Without an MSR
-/// bitmap every access causes an exit, so the local-APIC timer can be emulated
-/// entirely in the WRMSR handler.
-const IA32_TSC_DEADLINE: u32 = 0x6e0;
-const IA32_X2APIC_LVT_TIMER: u32 = 0x832;
-const IA32_X2APIC_INIT_COUNT: u32 = 0x838;
-
-/// LVT timer-mode field (bits 18:17): one-shot, periodic or TSC-deadline.
-const LVT_TIMER_MODE_MASK: u64 = 0b11 << 17;
-const LVT_TIMER_MODE_PERIODIC: u64 = 0b01 << 17;
-const LVT_TIMER_MODE_TSC_DEADLINE: u64 = 0b10 << 17;
-/// LVT mask bit (bit 16): when set, the timer interrupt is suppressed.
-const LVT_MASKED: u64 = 1 << 16;
-
-/* desired control word constrained by hardware/hypervisor capabilities */
-/*#[inline(always)]
-fn cap2ctrl(cap: u64, ctrl: u64) -> u64 {
-	(ctrl | (cap & 0xffffffff)) & (cap >> 32)
-}*/
-
-/// Emulated state of the guest's local-APIC timer (programmed via x2APIC MSRs).
-///
-/// VT-x APIC virtualization does not model the local-APIC timer, so the guest's
-/// writes to the timer registers are captured here and turned into a host
-/// deadline that the VMX-preemption timer raises a VM-exit on.
-#[derive(Default)]
-struct ApicTimer {
-	/// Interrupt vector to inject, taken from the LVT timer register.
-	vector: u8,
-	/// Whether the timer interrupt is currently masked (LVT bit 16).
-	masked: bool,
-	/// Whether the LVT timer is in TSC-deadline mode.
-	tsc_deadline_mode: bool,
-	/// Whether the LVT timer is in periodic mode (re-arm after each expiry).
-	periodic: bool,
-	/// Absolute host-TSC value at which the timer should next fire, if armed.
-	deadline: Option<u64>,
-	/// Period in TSC ticks, used to re-arm a periodic timer after it expires.
-	period: Option<u64>,
-}
 
 /// The Intel VT-x backend of a single virtual CPU.
 ///
@@ -125,6 +92,11 @@ pub struct VmxCpu {
 	/// Right-shift applied to the TSC to obtain the VMX-preemption timer's tick
 	/// rate (`IA32_VMX_MISC[4:0]`).
 	preempt_scale: u8,
+
+	/// The guest's extended FP state, preserved across runs ([`fpu`](crate::fpu)).
+	guest_fpu: Box<FpuState>,
+	/// Scratch area holding the host's FP state while the guest runs.
+	host_fpu: Box<FpuState>,
 }
 
 impl VmxCpu {
@@ -398,6 +370,8 @@ impl VmxCpu {
 			apic_timer: ApicTimer::default(),
 			pending_vector: None,
 			preempt_scale,
+			guest_fpu: Box::new(FpuState::init_guest()),
+			host_fpu: Box::new(FpuState::scratch()),
 		};
 
 		cpu.init()?;
@@ -429,8 +403,20 @@ impl VcpuBackend<GuestRegisters> for VmxCpu {
 		self.inject_pending()?;
 		self.arm_preemption_timer()?;
 
+		// Swap the host's live FP state out for the guest's so the guest's
+		// register file survives the run (VM-entry preserves none of it); see
+		// [`fpu`](crate::fpu).
+		self.host_fpu.save();
+		self.guest_fpu.restore();
+
 		// Enter the guest. Returns the RFLAGS produced by VMLAUNCH/VMRESUME.
 		let flags = unsafe { run_vmx_vm(&mut self.regs) };
+
+		// Capture the guest's FP state and put the host's back before any host
+		// code (which may use FP) runs again.
+		self.guest_fpu.save();
+		self.host_fpu.restore();
+
 		self.launched = true;
 
 		// A set ZF (VMfailValid) or CF (VMfailInvalid) means VM-entry failed and
