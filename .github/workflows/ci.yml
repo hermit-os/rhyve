@@ -18,8 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -45,6 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        lfs: true
     - uses: dtolnay/rust-toolchain@stable
     - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
     - uses: mkroening/rust-toolchain-toml@main
