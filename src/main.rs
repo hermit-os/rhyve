@@ -81,7 +81,10 @@ fn init_hypervisor(
 	guest_size: usize,
 	output: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 ) -> Result<(), HypervisorError> {
-	info!("Using image {image:?} with {} MiB of guest memory", guest_size >> 20);
+	info!(
+		"Using image {image:?} with {} MiB of guest memory",
+		guest_size >> 20
+	);
 
 	// Create slice for the guest
 	let layout =
@@ -381,7 +384,10 @@ async fn run_guest(
 
 	// Clamp to the minimum and round up to a large-page (2 MiB) boundary so the
 	// guest's page tables map whole large pages.
-	let mem_mib = params.mem_mib.unwrap_or(DEFAULT_GUEST_MIB).max(MIN_GUEST_MIB);
+	let mem_mib = params
+		.mem_mib
+		.unwrap_or(DEFAULT_GUEST_MIB)
+		.max(MIN_GUEST_MIB);
 	let guest_size = (mem_mib << 20).next_multiple_of(LargePageSize::SIZE as usize);
 
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();

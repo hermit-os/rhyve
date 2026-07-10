@@ -26,8 +26,18 @@ serial output stream back to your browser.
 
 rhyve must be built against a Hermit kernel that provides the
 `sys_virt_addr_to_phys_addr` syscall (it translates host-virtual to
-host-physical addresses for the nested page tables). Point the build at such a
-kernel checkout via `HERMIT_MANIFEST_DIR`.
+host-physical addresses for the nested page tables). This function is
+provided by the kernel of the branch `rhyve`. Checkout this branch
+on your local device
+
+```sh
+$ git clone git@github.com:hermit-os/kernel.git
+$ cd kernel
+$ git checkout rhyve
+```
+
+By building `rhyve`, the environment variable `HERMIT_MANIFEST_DIR` should
+point to the location of the kernel, which provides to `sys_virt_addr_to_phys_addr`.
 
 ## Building and running
 
