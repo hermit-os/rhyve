@@ -18,8 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -41,10 +39,12 @@ jobs:
         run: cargo fmt -- --check
 
   run:
-    name: Build
+    name: Build and run
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        lfs: true
     - uses: dtolnay/rust-toolchain@stable
     - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
     - uses: mkroening/rust-toolchain-toml@main
@@ -65,3 +65,67 @@ jobs:
       run: cargo build --release
       env:
         HERMIT_MANIFEST_DIR: /home/runner/work/rhyve/kernel
+    - name: Download loader
+      run: gh release download --repo hermit-os/loader --pattern hermit-loader-x86_64
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86
+    - name: Enable KVM
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+    - name: Run hello_world in a rhyve VM
+      timeout-minutes: 10
+      env:
+        HERMIT_MANIFEST_DIR: /home/runner/work/rhyve/kernel
+      run: |
+        set -euo pipefail
+
+        # Boot rhyve under QEMU (the cargo runner in .cargo/config.toml starts
+        # QEMU with the guest's serial output on stdio) in the background.
+        cargo run --release > rhyve.log 2>&1 &
+        RHYVE_PID=$!
+
+        cleanup() {
+          kill "$RHYVE_PID" 2>/dev/null || true
+          wait "$RHYVE_PID" 2>/dev/null || true
+        }
+        trap cleanup EXIT
+
+        # Wait for the upload service to come up (it prints once the socket is
+        # bound). Fail fast if rhyve exits early.
+        for _ in $(seq 1 60); do
+          if grep -q "upload service listening" rhyve.log; then
+            break
+          fi
+          if ! kill -0 "$RHYVE_PID" 2>/dev/null; then
+            echo "::error::rhyve exited before the upload service came up"
+            cat rhyve.log
+            exit 1
+          fi
+          sleep 2
+        done
+
+        if ! grep -q "upload service listening" rhyve.log; then
+          echo "::error::timed out waiting for the rhyve upload service"
+          cat rhyve.log
+          exit 1
+        fi
+
+        # Upload the guest image and run it, streaming its serial output.
+        curl --fail --silent --show-error \
+          --upload-file data/x86_64/hello_world \
+          http://localhost:9975/image/hello
+        timeout 120 curl --fail --silent --show-error -N \
+          -X POST http://localhost:9975/run/hello | tee guest.log
+
+        # Verify the guest actually ran.
+        if ! grep -q "Hello, world!" guest.log; then
+          echo "::error::hello_world did not produce the expected output"
+          echo "--- rhyve.log ---"; cat rhyve.log
+          echo "--- guest.log ---"; cat guest.log
+          exit 1
+        fi
+        echo "hello_world booted successfully inside the rhyve VM"
