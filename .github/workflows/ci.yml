@@ -50,6 +50,12 @@ jobs:
     - uses: mkroening/rust-toolchain-toml@main
     - name: Show CPU features
       run: lscpu
+    - name: Checkout kernel
+      run: |
+        pwd
+        git clone git@github.com:hermit-os/kernel.git
+        cd kernel
+        git checkout rhyve
     - name: Build dev profile
       run: cargo build
     - name: Build release profile
