@@ -65,6 +65,8 @@ jobs:
       run: cargo build --release
       env:
         HERMIT_MANIFEST_DIR: /home/runner/work/rhyve/kernel
+    - name: Download loader
+      run: gh release download --repo hermit-os/loader --pattern hermit-loader-x86_64
     - name: Install QEMU
       run: |
         sudo apt-get update
