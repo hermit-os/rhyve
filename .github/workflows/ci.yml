@@ -28,7 +28,7 @@ jobs:
           rustup component add clippy llvm-tools
       - name: Clippy
         run: |
-          cargo clippy --target x86_64-unknown-none
+          cargo clippy --target x86_64-unknown-hermit
 
   format:
     name: Format
@@ -50,7 +50,18 @@ jobs:
     - uses: mkroening/rust-toolchain-toml@main
     - name: Show CPU features
       run: lscpu
+    - name: Checkout kernel
+      run: |
+        cd ..
+        git clone https://github.com/hermit-os/kernel.git
+        cd kernel
+        git checkout rhyve
+        cd /home/runner/work/rhyve
     - name: Build dev profile
       run: cargo build
+      env:
+        HERMIT_MANIFEST_DIR: /home/runner/work/rhyve/kernel
     - name: Build release profile
       run: cargo build --release
+      env:
+        HERMIT_MANIFEST_DIR: /home/runner/work/rhyve/kernel

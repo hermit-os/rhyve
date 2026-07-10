@@ -78,12 +78,15 @@ fn load_guest_image(
 
 fn init_hypervisor(
 	image: &str,
+	guest_size: usize,
 	output: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 ) -> Result<(), HypervisorError> {
-	info!("Using image {image:?}");
+	info!(
+		"Using image {image:?} with {} MiB of guest memory",
+		guest_size >> 20
+	);
 
 	// Create slice for the guest
-	let guest_size = 512 << 20; // create VM with a memory size of 256 MiB
 	let layout =
 		unsafe { Layout::from_size_align_unchecked(guest_size, LargePageSize::SIZE as usize) };
 	// Keep the allocation around so it can be freed after the run (otherwise every
@@ -180,6 +183,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <style>
     body { font-family: sans-serif; max-width: 50rem; margin: 3rem auto; }
     #result { white-space: pre-wrap; margin-top: 1rem; }
+    #memrow { margin-top: 1rem; }
     #output {
       margin-top: 1rem;
       height: 24rem;
@@ -210,6 +214,11 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <input type="file" id="file">
   <button id="btn">Upload</button>
   <button id="run" disabled>Run guest</button>
+  <div id="memrow">
+    <label id="memlabel">RAM (MiB):
+      <input type="number" id="mem" min="128" step="128" value="512">
+    </label>
+  </div>
   <div id="result"></div>
   <div id="toolbar" hidden>
     <button id="clear">Clear</button>
@@ -230,6 +239,16 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     document.getElementById('wrap').onchange = (e) => {
       output.style.whiteSpace = e.target.checked ? 'pre-wrap' : 'pre';
     };
+
+    // Guest RAM in MiB, never below 128.
+    const memInput = document.getElementById('mem');
+    const memMiB = () => {
+      let m = parseInt(memInput.value, 10);
+      if (!Number.isFinite(m) || m < 128) m = 128;
+      memInput.value = m;
+      return m;
+    };
+    memInput.onchange = memMiB;
 
     document.getElementById('btn').onclick = async () => {
       const input = document.getElementById('file');
@@ -256,7 +275,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       output.textContent = '';
       setBytes(0);
       try {
-        const resp = await fetch('/run/' + encodeURIComponent(lastName), { method: 'POST' });
+        const resp = await fetch(
+          '/run/' + encodeURIComponent(lastName) + '?mem_mib=' + memMiB(),
+          { method: 'POST' });
         if (!resp.ok) { result.textContent = 'Error: ' + await resp.text(); return; }
         result.textContent = '';
         const reader = resp.body.getReader();
@@ -321,6 +342,20 @@ async fn store_image(
 	Ok(msg)
 }
 
+/// Smallest guest memory size the service accepts, in MiB. Below this the hermit
+/// guest cannot complete its boot.
+const MIN_GUEST_MIB: usize = 128;
+/// Guest memory size used when the request does not specify one, in MiB.
+const DEFAULT_GUEST_MIB: usize = 512;
+
+/// Query parameters of `POST /run/{name}`.
+#[derive(serde::Deserialize, Debug)]
+struct RunParams {
+	/// Requested guest memory size in MiB.
+	#[serde(default)]
+	mem_mib: Option<usize>,
+}
+
 /// Runs the hypervisor on a previously uploaded image, streaming the guest's
 /// serial output back as it is produced.
 ///
@@ -330,8 +365,12 @@ async fn store_image(
 /// response body. With a preemptive host scheduler the runtime thread is preempted
 /// off the guest periodically and drains the channel, so the client receives the
 /// output incrementally; the body ends when the guest finishes (senders dropped).
+///
+/// The guest memory size (MiB) is taken from the `mem_mib` query parameter,
+/// clamped to at least [`MIN_GUEST_MIB`] and rounded up to a large-page boundary.
 async fn run_guest(
 	axum::extract::Path(name): axum::extract::Path<String>,
+	axum::extract::Query(params): axum::extract::Query<RunParams>,
 ) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
 	use tokio_stream::StreamExt;
 	use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -343,13 +382,21 @@ async fn run_guest(
 		));
 	}
 
+	// Clamp to the minimum and round up to a large-page (2 MiB) boundary so the
+	// guest's page tables map whole large pages.
+	let mem_mib = params
+		.mem_mib
+		.unwrap_or(DEFAULT_GUEST_MIB)
+		.max(MIN_GUEST_MIB);
+	let guest_size = (mem_mib << 20).next_multiple_of(LargePageSize::SIZE as usize);
+
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 	let stream = UnboundedReceiverStream::new(rx).map(Ok::<Vec<u8>, std::io::Error>);
 	let body = axum::body::Body::from_stream(stream);
 
 	let path = format!("/image/{name}");
 	tokio::task::spawn_blocking(move || {
-		if let Err(e) = init_hypervisor(&path, tx.clone()) {
+		if let Err(e) = init_hypervisor(&path, guest_size, tx.clone()) {
 			let _ = tx.send(format!("\n[run failed: {e:?}]\n").into_bytes());
 		}
 		// Dropping the last sender closes the channel and ends the response.
