@@ -5,7 +5,7 @@ authors = ["Stefan Lankes <slankes@eonerc.rwth-aachen.de>"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
 keywords = ["hypervisor", "virtualization", "x86-64"]
-categories = ["no_std", "virtualization"]
+categories = ["no-std", "virtualization"]
 repository = "https://github.com/hermit-os/rhyve"
 description = "Hardware-virtualization backend (Intel VT-x, AMD-V) for the rhyve hypervisor"
 
