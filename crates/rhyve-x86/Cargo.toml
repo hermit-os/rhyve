@@ -10,7 +10,7 @@ repository = "https://github.com/hermit-os/rhyve"
 description = "Hardware-virtualization backend (Intel VT-x, AMD-V) for the rhyve hypervisor"
 
 [dependencies]
-rhyve-core = { path = "../rhyve-core" }
+rhyve-core = { path = "../rhyve-core", version = "0.1.0" }
 log = { version = "0.4", default-features = false }
 x86_64 = "0.15"
 raw-cpuid = "11.6.0"
