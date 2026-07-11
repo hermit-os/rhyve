@@ -1,5 +1,8 @@
 # rhyve-core
 
+[![crates.io](https://img.shields.io/crates/v/rhyve-core.svg)](https://crates.io/crates/rhyve-core)
+![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
+
 Backend-agnostic core of the [rhyve](../../README.md) hypervisor.
 
 `rhyve-core` is a small `#![no_std]` library that defines the contract between
