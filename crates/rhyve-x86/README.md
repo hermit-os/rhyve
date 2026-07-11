@@ -1,5 +1,8 @@
 # rhyve-x86
 
+[![crates.io](https://img.shields.io/crates/v/rhyve-x86.svg)](https://crates.io/crates/rhyve-x86)
+![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
+
 x86 hardware-virtualization backend for the [rhyve](../../README.md) hypervisor.
 
 `rhyve-x86` is a `#![no_std]` library that implements
