@@ -1,13 +1,13 @@
 [package]
 name = "rhyve-core"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Stefan Lankes <slankes@eonerc.rwth-aachen.de>"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
 keywords = ["hypervisor", "virtualization"]
 categories = ["no-std", "virtualization"]
 repository = "https://github.com/hermit-os/rhyve"
-description = "Hardware-virtualization backend (Intel VT-x) for the rhyve hypervisor"
+description = "Backend-agnostic core of the rhyve hypervisor"
 
 [dependencies]
 thiserror-no-std = "2.0.2"
